@@ -21,17 +21,22 @@
 
 mod entry;
 
+use alloc::string::String;
 use core::ptr;
 use core::{arch::asm, mem::transmute};
 
+use crate::error::OsError;
 use crate::mem::{
     layout::{MMIO_BASE, PLIC_BASE, VM_BASE},
     malloc::{kalloc, kfree},
     palloc::UserPool,
+    userbuf::{read_user_item, read_user_str, write_user_item, write_user_str},
     utils::{PageAlign, PhysAddr, PG_SIZE},
 };
 use crate::mem::{KERN_BASE, PG_SHIFT, VM_OFFSET};
 use crate::sync::OnceCell;
+use crate::thread::current;
+use crate::Result;
 
 pub use self::entry::*;
 
@@ -85,6 +90,47 @@ impl PageTable {
                 .walk(Self::px(1, va))
                 .map(|l0_table| l0_table.entries.get(Self::px(0, va)).unwrap())
         })
+    }
+
+    pub fn read_user_str(&self, va: usize) -> Result<String> {
+        if let Some(pte) = self.get_pte(va.floor()) {
+            let offset = va - va.floor();
+            let pa = pte.pa().into_va() + offset;
+            read_user_str(pa as *const u8)
+        } else {
+            Err(OsError::BadPtr)
+        }
+    }
+
+    pub fn read_user_item<T: Sized>(&self, va: usize) -> Result<T> {
+        if let Some(pte) = self.get_pte(va.floor()) {
+            let offset = va - va.floor();
+            let pa = pte.pa().into_va() + offset;
+            read_user_item(pa as *const T)
+        } else {
+            Err(OsError::BadPtr)
+        }
+    }
+
+    pub fn write_user_str(&self, va: usize, string: &String) -> Result<()> {
+        if let Some(pte) = self.get_pte(va.floor()) {
+            let offset = va - va.floor();
+            let pa = pte.pa().into_va() + offset;
+            write_user_str(pa as *mut u8, string)
+        } else {
+            Err(OsError::BadPtr)
+        }
+    }
+
+    pub fn write_user_item<T: Sized>(&self, va: usize, item: &T) -> Result<()> {
+        if let Some(pte) = self.get_pte(va.floor()) {
+            kprintln!("...");
+            let offset = va - va.floor();
+            let pa = pte.pa().into_va() + offset;
+            write_user_item(pa as *mut T, item)
+        } else {
+            Err(OsError::BadPtr)
+        }
     }
 
     /// Free all memory used by this pagetable back to where they were allocated.
@@ -162,6 +208,28 @@ impl PageTable {
 
         (va >> px_shift(level)) & Self::PX_MASK
     }
+}
+
+pub fn pt_read_user_str(va: usize) -> Result<String> {
+    let pt = unsafe { PageTable::effective_pagetable() };
+    pt.read_user_str(va)
+}
+
+pub fn pt_read_user_item<T: Sized>(va: usize) -> Result<T> {
+    let pt = unsafe { PageTable::effective_pagetable() };
+    pt.read_user_item(va)
+}
+
+pub fn pt_write_user_str(va: usize, string: &String) -> Result<()> {
+    let pt = unsafe { PageTable::effective_pagetable() };
+    pt.write_user_str(va, string)
+}
+
+pub fn pt_write_user_item<T: Sized>(va: usize, item: &T) -> Result<()> {
+    // let pt = unsafe { PageTable::effective_pagetable() };
+    let current = current();
+    let pt = current.pagetable.as_ref().unwrap().lock();
+    pt.write_user_item(va, item)
 }
 
 pub struct KernelPgTable(OnceCell<PageTable>);

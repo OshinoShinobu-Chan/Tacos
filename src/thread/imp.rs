@@ -2,13 +2,15 @@
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::arch::global_asm;
+use core::cell::{RefCell, RefMut};
 use core::fmt::{self, Debug};
 use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering::SeqCst};
 
 use crate::mem::{kalloc, kfree, PageTable, PG_SIZE};
 use crate::sbi::interrupt;
-use crate::thread::Manager;
+use crate::thread::{current, Manager};
 use crate::userproc::UserProc;
 
 pub const PRI_DEFAULT: u32 = 31;
@@ -33,6 +35,55 @@ pub struct Thread {
     pub priority: AtomicU32,
     pub userproc: Option<UserProc>,
     pub pagetable: Option<Mutex<PageTable>>,
+    pub children: Mutex<Vec<ThreadInfo>>,
+    mut_part: ThreadMut,
+}
+
+pub struct ThreadMut {
+    pub inner: RefCell<ThreadMutInner>,
+}
+
+unsafe impl Sync for ThreadMut {}
+
+pub struct ThreadMutInner {
+    fd_table: Vec<(file, usize)>,
+    recycled_fd: Vec<usize>,
+}
+
+pub struct ThreadInfo {
+    thread: Option<Arc<Thread>>,
+    tid: usize,
+    /// if the thread is not dead, exit code is ```None```
+    exit_code: Option<isize>,
+}
+
+impl ThreadInfo {
+    pub fn new(thread: Arc<Thread>) -> Self {
+        ThreadInfo {
+            tid: thread.tid as usize,
+            thread: Some(thread),
+            exit_code: None,
+        }
+    }
+
+    pub fn dead(&mut self, exit_code: isize) {
+        self.thread = None;
+        self.exit_code = Some(exit_code);
+    }
+
+    pub fn exit_code(&self) -> Option<isize> {
+        self.exit_code
+    }
+
+    pub fn tid(&self) -> usize {
+        self.tid
+    }
+}
+
+impl ThreadMut {
+    pub fn get_mut_part(&self) -> RefMut<'_, ThreadMutInner> {
+        self.inner.borrow_mut()
+    }
 }
 
 impl Thread {
@@ -56,6 +107,12 @@ impl Thread {
             priority: AtomicU32::new(priority),
             userproc,
             pagetable: pagetable.map(Mutex::new),
+            children: Mutex::new(Vec::new()),
+            mut_part: ThreadMut {
+                inner: RefCell::new(ThreadMutInner {
+                    // children: Vec::new(),
+                }),
+            },
         }
     }
 
@@ -79,9 +136,98 @@ impl Thread {
         (&*self.context.lock()) as *const _ as *mut _
     }
 
+    pub fn get_mut_part(&self) -> RefMut<'_, ThreadMutInner> {
+        self.mut_part.get_mut_part()
+    }
+
+    // pub fn add_children(&self, thread: Arc<Thread>) {
+    //     self.get_mut_part().add_children(thread)
+    // }
+
+    // pub fn check_child(&self, pid: usize) -> Option<isize> {
+    //     self.get_mut_part().check_child(pid)
+    // }
+
+    // pub fn dead_child(&self, pid: usize, exit_code: isize) {
+    //     self.get_mut_part().dead_child(pid, exit_code)
+    // }
+
+    // pub fn remove_child(&self, pid: usize) {
+    //     self.get_mut_part().remove_child(pid)
+    // }
+
+    pub fn add_children(&self, thread: Arc<Thread>) {
+        self.children.lock().push(ThreadInfo::new(thread));
+    }
+
+    /// return true if the child is dead, false is the child is alive, None if the child
+    /// doesn't exist
+    pub fn check_child(&self, pid: usize) -> Option<bool> {
+        self.children
+            .lock()
+            .iter()
+            .find(|child| child.tid == pid)
+            .map(|child| child.exit_code.is_some())
+    }
+
+    pub fn remove_child(&self, pid: usize) -> isize {
+        let mut children = self.children.lock();
+        let index = children
+            .iter()
+            .enumerate()
+            .find(|child| child.1.tid == pid)
+            .unwrap()
+            .0;
+        children.swap_remove(index).exit_code.unwrap()
+    }
+
+    pub fn dead_child(&self, pid: usize, exit_code: isize) {
+        let mut children = self.children.lock();
+        let child = children
+            .iter()
+            .enumerate()
+            .find(|child| child.1.tid == pid)
+            .map(|child| child.0);
+        children[child.unwrap()].dead(exit_code);
+    }
+
     pub fn overflow(&self) -> bool {
         unsafe { (self.stack as *const usize).read() != MAGIC }
     }
+}
+
+impl ThreadMutInner {
+    // pub fn add_children(&mut self, thread: Arc<Thread>) {
+    //     self.children.push(ThreadInfo::new(thread));
+    // }
+
+    // pub fn check_child(&self, pid: usize) -> Option<isize> {
+    //     self.children
+    //         .iter()
+    //         .find(|child| child.tid == pid)
+    //         .and_then(|child| child.exit_code)
+    // }
+
+    // pub fn remove_child(&mut self, pid: usize) {
+    //     self.children.swap_remove(
+    //         self.children
+    //             .iter()
+    //             .enumerate()
+    //             .find(|child| child.1.tid == pid)
+    //             .unwrap()
+    //             .0,
+    //     );
+    // }
+
+    // pub fn dead_child(&mut self, pid: usize, exit_code: isize) {
+    //     let child = self
+    //         .children
+    //         .iter()
+    //         .enumerate()
+    //         .find(|child| child.1.tid == pid)
+    //         .map(|child| child.0);
+    //     self.children[child.unwrap()].dead(exit_code);
+    // }
 }
 
 impl Debug for Thread {
@@ -176,6 +322,8 @@ impl Builder {
     /// Note that this function CANNOT be called during [`Manager`]'s initialization.
     pub fn spawn(self) -> Arc<Thread> {
         let new_thread = self.build();
+        let current = current();
+        current.add_children(new_thread.clone());
 
         #[cfg(feature = "debug")]
         kprintln!("[THREAD] create {:?}", new_thread);

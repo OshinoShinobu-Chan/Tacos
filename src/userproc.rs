@@ -4,6 +4,7 @@
 mod load;
 
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::mem::MaybeUninit;
@@ -11,17 +12,21 @@ use riscv::register::sstatus;
 
 use crate::fs::File;
 use crate::mem::pagetable::KernelPgTable;
-use crate::thread;
+use crate::thread::{self, current, schedule, Thread};
 use crate::trap::{trap_exit_u, Frame};
 
 pub struct UserProc {
     #[allow(dead_code)]
     bin: File,
+    parent: Weak<Thread>,
 }
 
 impl UserProc {
-    pub fn new(file: File) -> Self {
-        Self { bin: file }
+    pub fn new(file: File, parent: Arc<Thread>) -> Self {
+        Self {
+            bin: file,
+            parent: Arc::downgrade(&parent),
+        }
     }
 }
 
@@ -58,9 +63,35 @@ pub fn execute(mut file: File, argv: Vec<String>) -> isize {
     frame.x[2] = exec_info.init_sp;
 
     // Here the new process will be created.
-    let userproc = UserProc::new(file);
+    let current = current();
+    let userproc = UserProc::new(file, current);
 
     // TODO: (Lab2) Pass arguments to user program
+    let len = argv.len();
+    frame.x[2] -= (len + 1) * core::mem::size_of::<usize>();
+    let argv_base = frame.x[2];
+    let arg_ptr_addr: Vec<_> = (0..=len)
+        .map(|x| (frame.x[2] + x * core::mem::size_of::<usize>()))
+        .collect();
+    if pt.write_user_item(arg_ptr_addr[len], &0).is_err() {
+        return -1;
+    }
+    for i in 0..len {
+        let p = frame.x[2];
+        frame.x[2] -= argv[i].len();
+        if pt.write_user_item(arg_ptr_addr[i], &frame.x[2]).is_err() {
+            return -1;
+        }
+        if pt.write_user_str(frame.x[2], &argv[i]).is_err() {
+            return -1;
+        }
+        if pt.write_user_item(p, &0).is_err() {
+            return -1;
+        }
+    }
+    frame.x[2] -= frame.x[2] % 8;
+    frame.x[10] = len;
+    frame.x[11] = argv_base;
 
     thread::Builder::new(move || start(frame))
         .pagetable(pt)
@@ -72,8 +103,14 @@ pub fn execute(mut file: File, argv: Vec<String>) -> isize {
 /// Exits a process.
 ///
 /// Panic if the current thread doesn't own a user process.
-pub fn exit(_value: isize) -> ! {
+pub fn exit(value: isize) -> ! {
     // TODO: Lab2.
+    let current = current();
+    let parent = current.userproc.as_ref().unwrap().parent.clone();
+    let parent = parent.upgrade();
+    if let Some(parent) = parent {
+        parent.dead_child(current.id() as usize, value)
+    }
     thread::exit();
 }
 
@@ -82,8 +119,18 @@ pub fn exit(_value: isize) -> ! {
 /// ## Return
 /// - `Some(exit_value)`
 /// - `None`: if tid was not created by the current thread.
-pub fn wait(_tid: isize) -> Option<isize> {
+pub fn wait(tid: isize) -> Option<isize> {
     // TODO: Lab2.
+    let current = current();
+    if let Some(is_dead) = current.check_child(tid as usize) {
+        loop {
+            if is_dead {
+                return Some(current.remove_child(tid as usize));
+            } else {
+                schedule();
+            }
+        }
+    }
     Some(-1)
 }
 
