@@ -30,7 +30,7 @@ use crate::mem::{
     layout::{MMIO_BASE, PLIC_BASE, VM_BASE},
     malloc::{kalloc, kfree},
     palloc::UserPool,
-    userbuf::{read_user_item, read_user_str, write_user_item, write_user_str},
+    userbuf::{read_user_item, write_user_item, write_user_str},
     utils::{PageAlign, PhysAddr, PG_SIZE},
 };
 use crate::mem::{KERN_BASE, PG_SHIFT, VM_OFFSET};
@@ -93,17 +93,24 @@ impl PageTable {
     }
 
     pub fn read_user_str(&self, va: usize) -> Result<String> {
-        if let Some(pte) = self.get_pte(va.floor()) {
-            let offset = va - va.floor();
-            let pa = pte.pa().into_va() + offset;
-            read_user_str(pa as *const u8)
-        } else {
-            Err(OsError::BadPtr)
+        let mut ptr = va;
+        let mut s = String::new();
+        loop {
+            let c: u8 = self.read_user_item(ptr)?;
+            if c == 0 {
+                return Ok(s);
+            } else {
+                s.push(c as char);
+                ptr += 1;
+            }
         }
     }
 
     pub fn read_user_item<T: Sized>(&self, va: usize) -> Result<T> {
         if let Some(pte) = self.get_pte(va.floor()) {
+            if !pte.is_valid() {
+                return Err(OsError::BadPtr);
+            }
             let offset = va - va.floor();
             let pa = pte.pa().into_va() + offset;
             read_user_item(pa as *const T)
@@ -122,6 +129,7 @@ impl PageTable {
     }
 
     pub fn write_user_str(&self, va: usize, string: &String) -> Result<()> {
+        self.check_buf(va, string.len())?;
         if let Some(pte) = self.get_pte(va.floor()) {
             let offset = va - va.floor();
             let pa = pte.pa().into_va() + offset;

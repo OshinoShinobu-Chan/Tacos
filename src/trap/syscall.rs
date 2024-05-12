@@ -13,6 +13,7 @@ use crate::fs::disk::Path;
 use crate::fs::disk::DISKFS;
 use crate::io::Read;
 use crate::io::Seek;
+use crate::io::Write;
 use crate::mem::pagetable::{
     pt_check_buf, pt_read_user_item, pt_read_user_str, pt_write_user_item,
 };
@@ -40,15 +41,26 @@ const O_RDWR: usize = 0x2;
 const O_CREATE: usize = 0x200;
 const O_TRUNC: usize = 0x400;
 
+#[repr(C)]
+pub struct Fstat {
+    pub ino: u64,
+    pub size: u64,
+}
+
 pub fn syscall_handler(id: usize, args: [usize; 3]) -> isize {
     // kprintln!("[SYSCALL] id: {}, args: {:?}", id, args);
     match id {
         SYS_HALT => sys_halt(),
         SYS_EXIT => sys_exit(args[0] as isize),
         SYS_WAIT => sys_wait(args[0] as isize),
+        SYS_REMOVE => sys_remove(args[0] as *const u8),
         SYS_OPEN => sys_open(args[0] as *const u8, args[1] as usize),
         SYS_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYS_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
+        SYS_SEEK => sys_seek(args[0], args[1]),
+        SYS_CLOSE => sys_close(args[0]),
+        SYS_TELL => sys_tell(args[0]),
+        SYS_FSTAT => sys_fstat(args[0], args[1] as *mut Fstat),
         _ => panic!("Unsupported syscall!"),
     }
 }
@@ -202,17 +214,38 @@ fn sys_read(fd: usize, buf: *const u8, size: usize) -> isize {
                 current.replace_file(fd, file);
                 return i as isize;
             }
+            if pt_write_user_item(ptr as usize, b.as_ref().unwrap()).is_err() {
+                return -1;
+            }
+            unsafe { ptr = ptr.add(1) };
         }
         current.replace_file(fd, file);
         size as isize
     }
 }
 
+fn sys_seek(fd: usize, pos: usize) -> isize {
+    if fd == 0 || fd == 1 || fd == 2 {
+        return -1;
+    }
+    let current = current();
+    let mut file = {
+        let f = current.get_file(fd);
+        if f.is_none() {
+            return -1;
+        }
+        f.unwrap().0
+    };
+    let _ = file.seek(crate::io::SeekFrom::Start(pos));
+    current.replace_file(fd, file);
+    0
+}
+
 fn sys_write(fd: usize, buf: *const u8, size: usize) -> isize {
+    let mut ptr = buf;
     if fd == 0 {
         -1
     } else if fd == 1 || fd == 2 {
-        let mut ptr = buf;
         for _ in 0..size {
             let c: char = {
                 let c = pt_read_user_item(ptr as usize);
@@ -227,6 +260,112 @@ fn sys_write(fd: usize, buf: *const u8, size: usize) -> isize {
         }
         size as isize
     } else {
+        let current = current();
+        let mut file = {
+            let f = current.get_file(fd);
+            if f.is_none() {
+                return -1;
+            }
+            let (f, flag) = f.unwrap();
+            if (flag & O_RDWR == 0) && (flag & O_WRONLY == 0) {
+                return -1;
+            }
+            f
+        };
+        if pt_check_buf(buf as usize, size).is_err() {
+            return -1;
+        }
+        for i in 0..size {
+            let b: u8 = {
+                let b = pt_read_user_item(ptr as usize);
+                if b.is_err() {
+                    return -1;
+                } else {
+                    b.unwrap()
+                }
+            };
+            if file.write_from(b).is_err() {
+                current.replace_file(fd, file);
+                return i as isize;
+            }
+            unsafe { ptr = ptr.add(1) };
+        }
+        current.replace_file(fd, file);
+        size as isize
+    }
+}
+
+fn sys_remove(path: *const u8) -> isize {
+    let path_str = {
+        let s = pt_read_user_str(path as usize);
+        if s.is_err() {
+            return -1;
+        } else {
+            s.unwrap()
+        }
+    };
+    if DISKFS.remove(Path::from(path_str.as_str())).is_ok() {
+        0
+    } else {
         -1
     }
+}
+
+fn sys_tell(fd: usize) -> isize {
+    if fd == 0 || fd == 1 || fd == 2 {
+        return -1;
+    }
+    let current = current();
+    let mut file = {
+        let f = current.get_file(fd);
+        if f.is_none() {
+            return -1;
+        }
+        f.unwrap().0
+    };
+    if let Ok(pos) = file.pos() {
+        *pos as isize + 1
+    } else {
+        -1
+    }
+}
+
+fn sys_close(fd: usize) -> isize {
+    if fd == 0 || fd == 1 || fd == 2 {
+        return -1;
+    }
+    let current = current();
+    if current.get_file(fd).is_none() {
+        -1
+    } else {
+        current.remove_file(fd);
+        0
+    }
+}
+
+fn sys_fstat(fd: usize, buf: *mut Fstat) -> isize {
+    if fd == 0 || fd == 1 || fd == 2 {
+        return -1;
+    }
+    let current = current();
+    let file = {
+        let f = current.get_file(fd);
+        if f.is_none() {
+            return -1;
+        }
+        f.unwrap().0
+    };
+    let ino = file.inum() as u64;
+    let size = {
+        let s = file.len();
+        if s.is_err() {
+            return -1;
+        }
+        s.unwrap() as u64
+    };
+    let stat = Fstat { ino, size };
+    if pt_write_user_item(buf as usize, &stat).is_err() {
+        return -1;
+    }
+    return 0;
 }
