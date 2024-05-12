@@ -11,7 +11,12 @@ use alloc::vec::Vec;
 
 use crate::fs::disk::Path;
 use crate::fs::disk::DISKFS;
-use crate::mem::pagetable::{pt_read_user_item, pt_read_user_str};
+use crate::io::Read;
+use crate::io::Seek;
+use crate::mem::pagetable::{
+    pt_check_buf, pt_read_user_item, pt_read_user_str, pt_write_user_item,
+};
+use crate::sbi::{console_getchar, console_putchar};
 use crate::thread::current;
 use crate::userproc::{self, execute, wait};
 use crate::FileSys;
@@ -36,11 +41,14 @@ const O_CREATE: usize = 0x200;
 const O_TRUNC: usize = 0x400;
 
 pub fn syscall_handler(id: usize, args: [usize; 3]) -> isize {
-    kprintln!("[SYSCALL] id: {}, args: {:?}", id, args);
+    // kprintln!("[SYSCALL] id: {}, args: {:?}", id, args);
     match id {
         SYS_HALT => sys_halt(),
         SYS_EXIT => sys_exit(args[0] as isize),
         SYS_WAIT => sys_wait(args[0] as isize),
+        SYS_OPEN => sys_open(args[0] as *const u8, args[1] as usize),
+        SYS_READ => sys_read(args[0], args[1] as *const u8, args[2]),
+        SYS_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         _ => panic!("Unsupported syscall!"),
     }
 }
@@ -150,18 +158,75 @@ fn sys_open(path: *const u8, flag: usize) -> isize {
         5 | 7 => {
             // file exists, but in trunc mode, so remove the previous one
             // and create a new one
-            if DISKFS
-                .remove(Path::from(path_str.clone().as_str()))
-                .is_err()
-            {
-                return -1;
-            }
-            if let Ok(file) = DISKFS.create(Path::from(path_str.as_str())) {
-                current.add_file(file, flag) as isize
-            } else {
-                -1
-            }
+            let mut file = DISKFS.get().open(Path::from(path_str.as_str())).unwrap();
+            let _ = file.seek(crate::io::SeekFrom::Start(0));
+            current.add_file(file, flag) as isize
         }
         _ => panic!("[SYS_OPEN] unexpected mark value"),
+    }
+}
+
+fn sys_read(fd: usize, buf: *const u8, size: usize) -> isize {
+    let mut ptr = buf;
+    if fd == 0 {
+        // read from console
+        for _ in 0..size {
+            let c = console_getchar() as u8;
+            if pt_write_user_item(ptr as usize, &c).is_err() {
+                return -1;
+            }
+            unsafe { ptr = ptr.add(1) };
+        }
+        size as isize
+    } else if fd == 1 {
+        -1
+    } else {
+        let current = current();
+        let mut file = {
+            let f = current.get_file(fd);
+            if f.is_none() {
+                return -1;
+            }
+            let (f, flag) = f.unwrap();
+            if (flag & O_RDWR == 0) && (flag & O_WRONLY != 0) {
+                return -1;
+            }
+            f
+        };
+        if pt_check_buf(buf as usize, size).is_err() {
+            return -1;
+        }
+        for i in 0..size {
+            let b: Result<u8, crate::OsError> = file.read_into();
+            if b.is_err() {
+                current.replace_file(fd, file);
+                return i as isize;
+            }
+        }
+        current.replace_file(fd, file);
+        size as isize
+    }
+}
+
+fn sys_write(fd: usize, buf: *const u8, size: usize) -> isize {
+    if fd == 0 {
+        -1
+    } else if fd == 1 || fd == 2 {
+        let mut ptr = buf;
+        for _ in 0..size {
+            let c: char = {
+                let c = pt_read_user_item(ptr as usize);
+                if c.is_err() {
+                    return -1;
+                } else {
+                    c.unwrap()
+                }
+            };
+            console_putchar(c as usize);
+            unsafe { ptr = ptr.add(1) };
+        }
+        size as isize
+    } else {
+        -1
     }
 }

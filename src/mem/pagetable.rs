@@ -112,6 +112,15 @@ impl PageTable {
         }
     }
 
+    pub fn check_buf(&self, va: usize, size: usize) -> Result<()> {
+        for _ in 0..size {
+            if self.get_pte(va.floor()).is_none() {
+                return Err(OsError::BadPtr);
+            }
+        }
+        Ok(())
+    }
+
     pub fn write_user_str(&self, va: usize, string: &String) -> Result<()> {
         if let Some(pte) = self.get_pte(va.floor()) {
             let offset = va - va.floor();
@@ -124,7 +133,6 @@ impl PageTable {
 
     pub fn write_user_item<T: Sized>(&self, va: usize, item: &T) -> Result<()> {
         if let Some(pte) = self.get_pte(va.floor()) {
-            kprintln!("...");
             let offset = va - va.floor();
             let pa = pte.pa().into_va() + offset;
             write_user_item(pa as *mut T, item)
@@ -230,6 +238,12 @@ pub fn pt_write_user_item<T: Sized>(va: usize, item: &T) -> Result<()> {
     let current = current();
     let pt = current.pagetable.as_ref().unwrap().lock();
     pt.write_user_item(va, item)
+}
+
+pub fn pt_check_buf(va: usize, size: usize) -> Result<()> {
+    let current = current();
+    let pt = current.pagetable.as_ref().unwrap().lock();
+    pt.check_buf(va, size)
 }
 
 pub struct KernelPgTable(OnceCell<PageTable>);

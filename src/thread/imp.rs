@@ -1,6 +1,7 @@
 //! Implementation of kernel threads
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
@@ -8,6 +9,7 @@ use core::cell::{RefCell, RefMut};
 use core::fmt::{self, Debug};
 use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering::SeqCst};
 
+use crate::fs::File;
 use crate::mem::{kalloc, kfree, PageTable, PG_SIZE};
 use crate::sbi::interrupt;
 use crate::thread::{current, Manager};
@@ -46,8 +48,8 @@ pub struct ThreadMut {
 unsafe impl Sync for ThreadMut {}
 
 pub struct ThreadMutInner {
-    fd_table: Vec<(file, usize)>,
-    recycled_fd: Vec<usize>,
+    fd_table: Vec<Option<(File, usize)>>,
+    recycled_fd: VecDeque<usize>,
 }
 
 pub struct ThreadInfo {
@@ -111,6 +113,8 @@ impl Thread {
             mut_part: ThreadMut {
                 inner: RefCell::new(ThreadMutInner {
                     // children: Vec::new(),
+                    fd_table: Vec::new(),
+                    recycled_fd: VecDeque::new(),
                 }),
             },
         }
@@ -191,6 +195,22 @@ impl Thread {
         children[child.unwrap()].dead(exit_code);
     }
 
+    pub fn add_file(&self, file: File, flag: usize) -> usize {
+        self.get_mut_part().add_file(file, flag)
+    }
+
+    pub fn remove_file(&self, fd: usize) {
+        self.get_mut_part().remove_file(fd)
+    }
+
+    pub fn get_file(&self, fd: usize) -> Option<(File, usize)> {
+        self.get_mut_part().get_file(fd)
+    }
+
+    pub fn replace_file(&self, fd: usize, file: File) {
+        self.get_mut_part().replace_file(fd, file)
+    }
+
     pub fn overflow(&self) -> bool {
         unsafe { (self.stack as *const usize).read() != MAGIC }
     }
@@ -228,6 +248,37 @@ impl ThreadMutInner {
     //         .map(|child| child.0);
     //     self.children[child.unwrap()].dead(exit_code);
     // }
+
+    pub fn add_file(&mut self, file: File, flag: usize) -> usize {
+        if !self.recycled_fd.is_empty() {
+            let index = self.recycled_fd.pop_back().unwrap();
+            self.fd_table[index] = Some((file, flag));
+            index + 3
+        } else {
+            self.fd_table.push(Some((file, flag)));
+            self.fd_table.len() + 2
+        }
+    }
+
+    pub fn remove_file(&mut self, fd: usize) {
+        let index = fd - 3;
+        assert!(self.fd_table.len() > index);
+        assert!(self.fd_table[index].is_some());
+        self.fd_table[index] = None;
+        self.recycled_fd.push_front(index);
+    }
+
+    pub fn get_file(&self, fd: usize) -> Option<(File, usize)> {
+        self.fd_table.get(fd - 3).and_then(|f| f.clone())
+    }
+
+    pub fn replace_file(&mut self, fd: usize, file: File) {
+        let index = fd - 3;
+        assert!(self.fd_table.len() > index);
+        assert!(self.fd_table[index].is_some());
+        let flag = self.fd_table[index].clone().unwrap().1;
+        self.fd_table[index].replace((file, flag));
+    }
 }
 
 impl Debug for Thread {
