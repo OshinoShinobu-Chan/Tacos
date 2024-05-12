@@ -249,6 +249,9 @@ pub fn pt_write_user_item<T: Sized>(va: usize, item: &T) -> Result<()> {
 }
 
 pub fn pt_check_buf(va: usize, size: usize) -> Result<()> {
+    if va == 0 {
+        return Err(OsError::BadPtr);
+    }
     let current = current();
     let pt = current.pagetable.as_ref().unwrap().lock();
     pt.check_buf(va, size)

@@ -73,19 +73,28 @@ pub fn execute(mut file: File, argv: Vec<String>) -> isize {
     let arg_ptr_addr: Vec<_> = (0..=len)
         .map(|x| (frame.x[2] + x * core::mem::size_of::<usize>()))
         .collect();
-    if pt.write_user_item(arg_ptr_addr[len], &0).is_err() {
+    if pt
+        .write_user_item(arg_ptr_addr[len], &(0 as usize))
+        .is_err()
+    {
         return -1;
     }
     for i in 0..len {
-        let p = frame.x[2];
-        frame.x[2] -= argv[i].len();
+        let p = frame.x[2] - 1;
+        frame.x[2] -= argv[i].len() + 1;
+        // kprintln!(
+        //     "arg[{}] pos: {:#x}, value: {:#x}",
+        //     i,
+        //     arg_ptr_addr[i],
+        //     frame.x[2]
+        // );
         if pt.write_user_item(arg_ptr_addr[i], &frame.x[2]).is_err() {
             return -1;
         }
         if pt.write_user_str(frame.x[2], &argv[i]).is_err() {
             return -1;
         }
-        if pt.write_user_item(p, &0).is_err() {
+        if pt.write_user_item(p, &(0 as u8)).is_err() {
             return -1;
         }
     }
@@ -106,11 +115,12 @@ pub fn execute(mut file: File, argv: Vec<String>) -> isize {
 pub fn exit(value: isize) -> ! {
     // TODO: Lab2.
     let current = current();
-    let parent = current.userproc.as_ref().unwrap().parent.clone();
+    let parent = current.userproc.lock().as_ref().unwrap().parent.clone();
     let parent = parent.upgrade();
     if let Some(parent) = parent {
         parent.dead_child(current.id() as usize, value)
     }
+    drop(current.userproc.lock().take().unwrap().bin);
     thread::exit();
 }
 
@@ -129,6 +139,8 @@ pub fn wait(tid: isize) -> Option<isize> {
             } else {
                 schedule();
             }
+        } else {
+            return Some(-1);
         }
     }
 }

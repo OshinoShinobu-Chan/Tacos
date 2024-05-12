@@ -52,6 +52,7 @@ pub fn syscall_handler(id: usize, args: [usize; 3]) -> isize {
     match id {
         SYS_HALT => sys_halt(),
         SYS_EXIT => sys_exit(args[0] as isize),
+        SYS_EXEC => sys_exec(args[0] as *const u8, args[1] as *const usize),
         SYS_WAIT => sys_wait(args[0] as isize),
         SYS_REMOVE => sys_remove(args[0] as *const u8),
         SYS_OPEN => sys_open(args[0] as *const u8, args[1] as usize),
@@ -73,7 +74,7 @@ fn sys_halt() -> ! {
 /// Terminate this process
 fn sys_exit(exit_code: isize) -> ! {
     let current = current();
-    if current.userproc.is_some() {
+    if current.userproc.lock().is_some() {
         userproc::exit(exit_code)
     } else {
         unreachable!("thread without userproc should not call sys_exit")
@@ -89,6 +90,7 @@ fn sys_exec(path: *const u8, argv: *const usize) -> isize {
             return -1;
         }
     };
+    kprintln!("[EXEC] path: {}", path);
     let file = {
         let f = DISKFS.open(path.as_str().into());
         if f.is_ok() {
@@ -97,12 +99,14 @@ fn sys_exec(path: *const u8, argv: *const usize) -> isize {
             return -1;
         }
     };
+    // file.deny_write();
     // read the args
     let mut args: Vec<String> = Vec::new();
+    let mut ptr = argv;
     loop {
         // read pointer of arg
         let arg_ptr = {
-            let p = pt_read_user_item(argv as usize);
+            let p = pt_read_user_item(ptr as usize);
             if p.is_ok() {
                 p.unwrap()
             } else {
@@ -120,9 +124,13 @@ fn sys_exec(path: *const u8, argv: *const usize) -> isize {
                 return -1;
             }
         };
+        if arg.is_empty() {
+            break;
+        }
         args.push(arg);
-        unsafe { argv.add(1) };
+        unsafe { ptr = ptr.add(1) };
     }
+    kprintln!("[EXEC] Args: {:?}", args);
     execute(file, args)
 }
 
@@ -161,6 +169,10 @@ fn sys_open(path: *const u8, flag: usize) -> isize {
         }
         2 | 6 => {
             // file doesn't exist, create it
+            if path_str.is_empty() {
+                // should not create file with empty name
+                return -1;
+            }
             if let Ok(file) = DISKFS.create(Path::from(path_str.as_str())) {
                 current.add_file(file, flag) as isize
             } else {
@@ -284,9 +296,20 @@ fn sys_write(fd: usize, buf: *const u8, size: usize) -> isize {
                     b.unwrap()
                 }
             };
-            if file.write_from(b).is_err() {
-                current.replace_file(fd, file);
-                return i as isize;
+            // if file.write_from(b).is_err() {
+            //     current.replace_file(fd, file);
+            //     return i as isize;
+            // }
+            match file.write_from(b) {
+                Ok(()) => {}
+                Err(crate::OsError::UnexpectedEOF) => {
+                    current.replace_file(fd, file);
+                    return i as isize;
+                }
+                Err(_) => {
+                    current.replace_file(fd, file);
+                    return -1;
+                }
             }
             unsafe { ptr = ptr.add(1) };
         }
@@ -332,7 +355,7 @@ fn sys_tell(fd: usize) -> isize {
 
 fn sys_close(fd: usize) -> isize {
     if fd == 0 || fd == 1 || fd == 2 {
-        return -1;
+        return 0;
     }
     let current = current();
     if current.get_file(fd).is_none() {

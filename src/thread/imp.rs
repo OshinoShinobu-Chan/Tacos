@@ -35,7 +35,7 @@ pub struct Thread {
     status: Mutex<Status>,
     context: Mutex<Context>,
     pub priority: AtomicU32,
-    pub userproc: Option<UserProc>,
+    pub userproc: Mutex<Option<UserProc>>,
     pub pagetable: Option<Mutex<PageTable>>,
     pub children: Mutex<Vec<ThreadInfo>>,
     mut_part: ThreadMut,
@@ -107,7 +107,7 @@ impl Thread {
             status: Mutex::new(Status::Ready),
             context: Mutex::new(Context::new(stack, entry)),
             priority: AtomicU32::new(priority),
-            userproc,
+            userproc: Mutex::new(userproc),
             pagetable: pagetable.map(Mutex::new),
             children: Mutex::new(Vec::new()),
             mut_part: ThreadMut {
