@@ -122,8 +122,8 @@ pub fn exit(value: isize) -> ! {
 pub fn wait(tid: isize) -> Option<isize> {
     // TODO: Lab2.
     let current = current();
-    if let Some(is_dead) = current.check_child(tid as usize) {
-        loop {
+    loop {
+        if let Some(is_dead) = current.check_child(tid as usize) {
             if is_dead {
                 return Some(current.remove_child(tid as usize));
             } else {
@@ -131,7 +131,6 @@ pub fn wait(tid: isize) -> Option<isize> {
             }
         }
     }
-    Some(-1)
 }
 
 /// Initializes a user process in current thread.
