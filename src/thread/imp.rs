@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::cell::{RefCell, RefMut};
 use core::fmt::{self, Debug};
-use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering::SeqCst};
+use core::sync::atomic::{AtomicIsize, AtomicU32, AtomicUsize, Ordering::SeqCst};
 
 use crate::fs::File;
 use crate::mem::{kalloc, kfree, PageTable, PG_SIZE};
@@ -34,6 +34,8 @@ pub struct Thread {
     stack: usize,
     status: Mutex<Status>,
     context: Mutex<Context>,
+    bp: usize,
+    sp: AtomicUsize,
     pub priority: AtomicU32,
     pub userproc: Mutex<Option<UserProc>>,
     pub pagetable: Option<Mutex<PageTable>>,
@@ -96,6 +98,8 @@ impl Thread {
         entry: usize,
         userproc: Option<UserProc>,
         pagetable: Option<PageTable>,
+        bp: usize,
+        sp: usize,
     ) -> Self {
         /// The next thread's id
         static TID: AtomicIsize = AtomicIsize::new(0);
@@ -110,6 +114,8 @@ impl Thread {
             userproc: Mutex::new(userproc),
             pagetable: pagetable.map(Mutex::new),
             children: Mutex::new(Vec::new()),
+            bp,
+            sp: AtomicUsize::new(sp),
             mut_part: ThreadMut {
                 inner: RefCell::new(ThreadMutInner {
                     // children: Vec::new(),
@@ -140,25 +146,21 @@ impl Thread {
         (&*self.context.lock()) as *const _ as *mut _
     }
 
+    pub fn get_bp(&self) -> usize {
+        self.bp
+    }
+
+    pub fn get_sp(&self) -> usize {
+        self.sp.load(SeqCst)
+    }
+
+    pub fn set_sp(&self, sp: usize) {
+        self.sp.store(sp, SeqCst)
+    }
+
     pub fn get_mut_part(&self) -> RefMut<'_, ThreadMutInner> {
         self.mut_part.get_mut_part()
     }
-
-    // pub fn add_children(&self, thread: Arc<Thread>) {
-    //     self.get_mut_part().add_children(thread)
-    // }
-
-    // pub fn check_child(&self, pid: usize) -> Option<isize> {
-    //     self.get_mut_part().check_child(pid)
-    // }
-
-    // pub fn dead_child(&self, pid: usize, exit_code: isize) {
-    //     self.get_mut_part().dead_child(pid, exit_code)
-    // }
-
-    // pub fn remove_child(&self, pid: usize) {
-    //     self.get_mut_part().remove_child(pid)
-    // }
 
     pub fn add_children(&self, thread: Arc<Thread>) {
         self.children.lock().push(ThreadInfo::new(thread));
@@ -217,38 +219,6 @@ impl Thread {
 }
 
 impl ThreadMutInner {
-    // pub fn add_children(&mut self, thread: Arc<Thread>) {
-    //     self.children.push(ThreadInfo::new(thread));
-    // }
-
-    // pub fn check_child(&self, pid: usize) -> Option<isize> {
-    //     self.children
-    //         .iter()
-    //         .find(|child| child.tid == pid)
-    //         .and_then(|child| child.exit_code)
-    // }
-
-    // pub fn remove_child(&mut self, pid: usize) {
-    //     self.children.swap_remove(
-    //         self.children
-    //             .iter()
-    //             .enumerate()
-    //             .find(|child| child.1.tid == pid)
-    //             .unwrap()
-    //             .0,
-    //     );
-    // }
-
-    // pub fn dead_child(&mut self, pid: usize, exit_code: isize) {
-    //     let child = self
-    //         .children
-    //         .iter()
-    //         .enumerate()
-    //         .find(|child| child.1.tid == pid)
-    //         .map(|child| child.0);
-    //     self.children[child.unwrap()].dead(exit_code);
-    // }
-
     pub fn add_file(&mut self, file: File, flag: usize) -> usize {
         if !self.recycled_fd.is_empty() {
             let index = self.recycled_fd.pop_back().unwrap();
@@ -311,6 +281,8 @@ pub struct Builder {
     function: usize,
     userproc: Option<UserProc>,
     pagetable: Option<PageTable>,
+    bp: usize,
+    sp: usize,
 }
 
 impl Builder {
@@ -327,6 +299,8 @@ impl Builder {
             function: function as usize,
             userproc: None,
             pagetable: None,
+            bp: 0,
+            sp: 0,
         }
     }
 
@@ -350,6 +324,12 @@ impl Builder {
         self
     }
 
+    pub fn stack(mut self, bp: usize, sp: usize) -> Self {
+        self.bp = bp;
+        self.sp = sp;
+        self
+    }
+
     pub fn build(self) -> Arc<Thread> {
         let stack = kalloc(STACK_SIZE, STACK_ALIGN) as usize;
 
@@ -363,6 +343,8 @@ impl Builder {
             self.function,
             self.userproc,
             self.pagetable,
+            self.bp,
+            self.sp,
         ))
     }
 

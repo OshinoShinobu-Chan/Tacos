@@ -4,7 +4,7 @@ use elf_rs::{Elf, ElfFile, ProgramHeaderEntry, ProgramHeaderFlags, ProgramType};
 use crate::fs::File;
 use crate::io::prelude::*;
 use crate::mem::pagetable::{PTEFlags, PageTable};
-use crate::mem::palloc::UserPool;
+use crate::mem::palloc::PhysMemPool;
 use crate::mem::{div_round_up, PageAlign, PhysAddr, PG_MASK, PG_SIZE};
 use crate::{OsError, Result};
 
@@ -54,8 +54,10 @@ fn load_elf(file: &mut File, pagetable: &mut PageTable) -> Result<ExecInfo> {
         .filter(|p| p.ph_type() == ProgramType::LOAD)
         .for_each(|p| load_segment(&buf, &p, pagetable));
 
+    let entry_point = elf.elf_header().entry_point() as usize;
+
     Ok(ExecInfo {
-        entry_point: elf.elf_header().entry_point() as _,
+        entry_point,
         init_sp: 0x80500000,
     })
 }
@@ -89,7 +91,9 @@ fn load_segment(filebuf: &[u8], phdr: &ProgramHeaderEntry, pagetable: &mut PageT
 
     // Allocate & map pages
     for p in 0..pages {
-        let buf = unsafe { UserPool::alloc_pages(1) };
+        let uaddr = ubase + p * PG_SIZE;
+        // let buf = unsafe { UserPool::alloc_pages(1) };
+        let buf = PhysMemPool::pinned_alloc(uaddr) as *mut u8;
         let page = unsafe { (buf as *mut [u8; PG_SIZE]).as_mut().unwrap() };
 
         // Read `readsz` bytes, fill remaining bytes with 0.
@@ -99,7 +103,6 @@ fn load_segment(filebuf: &[u8], phdr: &ProgramHeaderEntry, pagetable: &mut PageT
 
         // The installed page will be freed when pagetable drops, which happens
         // when user process exits. No manual resource collect is required.
-        let uaddr = ubase + p * PG_SIZE;
         pagetable.map(buf.into(), uaddr, 1, leaf_flag);
 
         readbytes -= readsz;
@@ -114,11 +117,13 @@ fn init_user_stack(pagetable: &mut PageTable, init_sp: usize) {
     assert!(init_sp % PG_SIZE == 0, "initial sp address misaligns");
 
     // Allocate a page from UserPool as user stack.
-    let stack_va = unsafe { UserPool::alloc_pages(1) };
+    // let stack_va = unsafe { UserPool::alloc_pages(1) };
+    let stack_page_begin = PageAlign::floor(init_sp - 1);
+
+    let stack_va = PhysMemPool::pinned_alloc(stack_page_begin);
     let stack_pa = PhysAddr::from(stack_va);
 
     // Get the start address of stack page
-    let stack_page_begin = PageAlign::floor(init_sp - 1);
 
     // Install mapping
     let flags = PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U;

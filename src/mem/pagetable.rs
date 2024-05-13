@@ -29,11 +29,11 @@ use crate::error::OsError;
 use crate::mem::{
     layout::{MMIO_BASE, PLIC_BASE, VM_BASE},
     malloc::{kalloc, kfree},
-    palloc::UserPool,
+    palloc::{PhysMemPool, UserPool},
     userbuf::{read_user_item, write_user_item, write_user_str},
     utils::{PageAlign, PhysAddr, PG_SIZE},
 };
-use crate::mem::{KERN_BASE, PG_SHIFT, VM_OFFSET};
+use crate::mem::{KERN_BASE, PG_SHIFT, SUPPLEMENTAL_PAGETABLE, VM_OFFSET};
 use crate::sync::OnceCell;
 use crate::thread::current;
 use crate::Result;
@@ -92,7 +92,80 @@ impl PageTable {
         })
     }
 
-    pub fn read_user_str(&self, va: usize) -> Result<String> {
+    pub fn get_mut_pte(&self, va: usize) -> Option<&mut Entry> {
+        self.walk(Self::px(2, va)).and_then(|l1_table| {
+            l1_table
+                .walk(Self::px(1, va))
+                .map(|l0_table| l0_table.entries.get_mut(Self::px(0, va)).unwrap())
+        })
+    }
+
+    pub fn try_translate_va(&self, va: usize) -> Result<usize> {
+        if let Some(pte) = self.get_pte(va.floor()) {
+            if !pte.is_valid() {
+                return Err(OsError::BadPtr);
+            }
+            let offset = va - va.floor();
+            Ok(pte.pa().into_va() + offset)
+        } else {
+            Err(OsError::BadPtr)
+        }
+    }
+
+    pub fn is_writeable(&self, va: usize) -> bool {
+        if let Some(pte) = self.get_pte(va.floor()) {
+            pte.is_valid() && pte.is_writeable()
+        } else {
+            false
+        }
+    }
+
+    pub fn translate_va(&mut self, va: usize) -> Result<usize> {
+        let pa = self.try_translate_va(va);
+        if pa.is_ok() {
+            return pa;
+        }
+
+        // decide if it is stack growth
+        let current = current();
+        let sp = current.get_sp();
+        let bp = current.get_bp();
+        if va < sp || va >= bp {
+            return Err(OsError::BadPtr);
+        }
+
+        // lazy alloc first and then real alloc
+        let index = SUPPLEMENTAL_PAGETABLE
+            .lock()
+            .lazy_alloc(crate::mem::PageType::Swap(None));
+        self.map(
+            PhysAddr::from_pa(0),
+            va.floor(),
+            PG_SIZE,
+            PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U,
+        );
+        let entry = self.get_mut_pte(va).unwrap();
+        entry.evict(index);
+        let token = unsafe { PageTable::get_token() };
+        // kprintln!("pagetable token: {:#x}", token);
+        let pa = PhysMemPool::real_alloc(va.floor(), token) - VM_OFFSET;
+        self.map(
+            PhysAddr::from_pa(pa),
+            va.floor(),
+            PG_SIZE,
+            PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U,
+        );
+        kprintln!(
+            "expand page when syscall {:#x}-{:x}, pa: {:#x}",
+            va.floor(),
+            va.floor() + PG_SIZE,
+            pa,
+        );
+        let offset = va - va.floor();
+        return Ok(pa + offset + VM_OFFSET);
+    }
+
+    pub fn read_user_str(&mut self, va: usize) -> Result<String> {
         let mut ptr = va;
         let mut s = String::new();
         loop {
@@ -106,47 +179,37 @@ impl PageTable {
         }
     }
 
-    pub fn read_user_item<T: Sized>(&self, va: usize) -> Result<T> {
-        if let Some(pte) = self.get_pte(va.floor()) {
-            if !pte.is_valid() {
-                return Err(OsError::BadPtr);
-            }
-            let offset = va - va.floor();
-            let pa = pte.pa().into_va() + offset;
-            read_user_item(pa as *const T)
-        } else {
-            Err(OsError::BadPtr)
-        }
+    pub fn read_user_item<T: Sized>(&mut self, va: usize) -> Result<T> {
+        let pa = self.translate_va(va)?;
+        read_user_item(pa as *const T)
     }
 
-    pub fn check_buf(&self, va: usize, size: usize) -> Result<()> {
-        for _ in 0..size {
-            if self.get_pte(va.floor()).is_none() {
-                return Err(OsError::BadPtr);
+    pub fn check_buf(&mut self, va: usize, size: usize) -> Result<()> {
+        if va == 0 {
+            return Err(OsError::BadPtr);
+        }
+        let mut ptr = va;
+        let end = va + size;
+        while ptr < end {
+            let _ = self.translate_va(ptr)?;
+            if !self.is_writeable(va) {
+                return Err(OsError::UnwriteablePtr);
             }
+            ptr += PG_SIZE.min((ptr + 1).ceil() - ptr);
         }
         Ok(())
     }
 
-    pub fn write_user_str(&self, va: usize, string: &String) -> Result<()> {
+    pub fn write_user_str(&mut self, va: usize, string: &String) -> Result<()> {
         self.check_buf(va, string.len())?;
-        if let Some(pte) = self.get_pte(va.floor()) {
-            let offset = va - va.floor();
-            let pa = pte.pa().into_va() + offset;
-            write_user_str(pa as *mut u8, string)
-        } else {
-            Err(OsError::BadPtr)
-        }
+        let pa = self.translate_va(va)?;
+        write_user_str(pa as *mut u8, string)
     }
 
-    pub fn write_user_item<T: Sized>(&self, va: usize, item: &T) -> Result<()> {
-        if let Some(pte) = self.get_pte(va.floor()) {
-            let offset = va - va.floor();
-            let pa = pte.pa().into_va() + offset;
-            write_user_item(pa as *mut T, item)
-        } else {
-            Err(OsError::BadPtr)
-        }
+    pub fn write_user_item<T: Sized>(&mut self, va: usize, item: &T) -> Result<()> {
+        self.check_buf(va, core::mem::size_of::<T>())?;
+        let pa = self.translate_va(va)?;
+        write_user_item(pa as *mut T, item)
     }
 
     /// Free all memory used by this pagetable back to where they were allocated.
@@ -198,6 +261,17 @@ impl PageTable {
         Self::from_raw(PhysAddr::from_pa(ppn << PG_SHIFT).into_va() as *mut _)
     }
 
+    pub unsafe fn get_token() -> usize {
+        let satp: usize;
+        asm!("csrr {v}, satp", v = out(reg) satp);
+        satp
+    }
+
+    pub unsafe fn from_token(satp: usize) -> Self {
+        let ppn = satp & PPN_MASK;
+        Self::from_raw(PhysAddr::from_pa(ppn << PG_SHIFT).into_va() as *mut _)
+    }
+
     fn walk(&self, index: usize) -> Option<PageTable> {
         self.entries
             .get(index)
@@ -227,33 +301,27 @@ impl PageTable {
 }
 
 pub fn pt_read_user_str(va: usize) -> Result<String> {
-    let pt = unsafe { PageTable::effective_pagetable() };
+    let mut pt = unsafe { PageTable::effective_pagetable() };
     pt.read_user_str(va)
 }
 
 pub fn pt_read_user_item<T: Sized>(va: usize) -> Result<T> {
-    let pt = unsafe { PageTable::effective_pagetable() };
+    let mut pt = unsafe { PageTable::effective_pagetable() };
     pt.read_user_item(va)
 }
 
 pub fn pt_write_user_str(va: usize, string: &String) -> Result<()> {
-    let pt = unsafe { PageTable::effective_pagetable() };
+    let mut pt = unsafe { PageTable::effective_pagetable() };
     pt.write_user_str(va, string)
 }
 
 pub fn pt_write_user_item<T: Sized>(va: usize, item: &T) -> Result<()> {
-    // let pt = unsafe { PageTable::effective_pagetable() };
-    let current = current();
-    let pt = current.pagetable.as_ref().unwrap().lock();
+    let mut pt = unsafe { PageTable::effective_pagetable() };
     pt.write_user_item(va, item)
 }
 
 pub fn pt_check_buf(va: usize, size: usize) -> Result<()> {
-    if va == 0 {
-        return Err(OsError::BadPtr);
-    }
-    let current = current();
-    let pt = current.pagetable.as_ref().unwrap().lock();
+    let mut pt = unsafe { PageTable::effective_pagetable() };
     pt.check_buf(va, size)
 }
 

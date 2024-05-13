@@ -42,8 +42,20 @@ impl Entry {
         PTEFlags::from_bits_truncate(self.0)
     }
 
-    fn ppn(&self) -> usize {
+    pub fn ppn(&self) -> usize {
         self.0 >> Self::FLAG_SHIFT & PPN_MASK
+    }
+
+    pub fn evict(&mut self, index: usize) {
+        self.0 = index << Self::FLAG_SHIFT | 1 << 8 | 0x0;
+    }
+
+    pub fn on_disk(&self) -> bool {
+        (self.0 & 1 << 8) == 1
+    }
+
+    pub fn set_off_disk(&mut self) {
+        self.0 = self.0 & !(1 << 8);
     }
 
     /// Physical address where the entry maps to
@@ -61,6 +73,10 @@ impl Entry {
 
     pub fn is_rwable(&self) -> bool {
         self.flag().contains(PTEFlags::R | PTEFlags::W)
+    }
+
+    pub fn is_writeable(&self) -> bool {
+        self.flag().contains(PTEFlags::W)
     }
 
     pub fn is_user(&self) -> bool {

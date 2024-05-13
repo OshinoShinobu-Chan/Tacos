@@ -2,7 +2,12 @@
 
 use core::cmp::min;
 
+use crate::device::virtio::Virtio;
+use crate::device::virtio::SECTOR_SIZE;
+use crate::fs::disk::Swap;
+use crate::io::Seek;
 use crate::mem::utils::*;
+use crate::mem::PageTable;
 use crate::sync::{Intr, Lazy, Mutex};
 
 // BuddyAllocator allocates at most `1<<MAX_ORDER` pages at a time
@@ -158,11 +163,248 @@ impl UserPool {
     /// Initialize the page-based allocator
     pub unsafe fn init(start: usize, end: usize) {
         Self::instance().lock().insert_range(start, end);
+        PhysMemPool::instance().lock().insert_range(start);
     }
 
     fn instance() -> &'static Mutex<BuddyAllocator, Intr> {
         static USERPOOL: UserPool = UserPool(Lazy::new(|| Mutex::new(BuddyAllocator::empty())));
 
         &USERPOOL.0
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct PhysMemEntry {
+    va: Option<usize>,
+    index: Option<usize>,
+    pt_token: Option<usize>,
+    pinned: bool,
+}
+
+impl PhysMemEntry {
+    pub fn new() -> Self {
+        Self {
+            va: None,
+            index: None,
+            pt_token: None,
+            pinned: false,
+        }
+    }
+
+    pub fn alloc(&mut self, va: usize, index: usize, pt_token: usize) {
+        self.va = Some(va);
+        self.index = Some(index);
+        self.pt_token = Some(pt_token);
+    }
+
+    pub fn evict(
+        &mut self,
+        new_va: usize,
+        new_index: Option<usize>,
+        new_pt_token: usize,
+    ) -> PhysMemEntry {
+        let old = self.clone();
+        self.va = Some(new_va);
+        self.index = new_index;
+        self.pt_token = Some(new_pt_token);
+        old
+    }
+
+    pub fn write(&self, pa: usize) {
+        // write the content back
+        if !self.is_dirty() {
+            return;
+        }
+        let mut supplmental = SUPPLEMENTAL_PAGETABLE.lock();
+        match supplmental.get(self.index.unwrap()).unwrap() {
+            PageType::Swap(Some(sector)) => {
+                // write to swap sector directly
+                for i in sector..sector + 4 {
+                    Virtio::write_sector(i as u64, unsafe {
+                        core::mem::transmute(PhysAddr::from_pa(pa).into_va() as *const u8)
+                    });
+                }
+            }
+            PageType::Swap(None) => {
+                let pos = Swap::lock().pos().unwrap().clone();
+                let ino = Swap::lock().inum();
+                let sector = ino + pos / SECTOR_SIZE;
+                let pagetype: PageType = PageType::Swap(Some(sector));
+                supplmental.replace(self.index.unwrap(), pagetype);
+                for i in sector..sector + 4 {
+                    Virtio::write_sector(i as u64, unsafe {
+                        core::mem::transmute(PhysAddr::from_pa(pa).into_va() as *const u8)
+                    });
+                }
+            }
+            PageType::Mmap((_sector, _real_size)) => {
+                // TODO
+            }
+            PageType::Code => unreachable!("Code segment should not be dirty!"),
+        }
+    }
+
+    pub fn get_va(&self) -> Option<usize> {
+        self.va
+    }
+
+    pub fn get_index(&self) -> Option<usize> {
+        self.index
+    }
+
+    pub fn get_thread(&self) -> Option<usize> {
+        self.pt_token
+    }
+
+    pub fn is_used(&self) -> bool {
+        self.va.is_some()
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        let pt = unsafe { PageTable::from_token(self.pt_token.unwrap()) };
+        let pte = pt.get_pte(self.va.unwrap()).unwrap();
+        pte.is_dirty()
+    }
+
+    pub fn is_accessed(&self) -> bool {
+        let pt = unsafe { PageTable::from_token(self.pt_token.unwrap()) };
+        let pte = pt.get_pte(self.va.unwrap()).unwrap();
+        pte.is_accessed()
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    pub fn set_unaccessed(&self) {
+        let pt = unsafe { PageTable::from_token(self.pt_token.unwrap()) };
+        let pte = pt.get_mut_pte(self.va.unwrap()).unwrap();
+        pte.set_unaccessed()
+    }
+}
+
+pub struct PhysMemList {
+    list: [PhysMemEntry; USER_POOL_LIMIT],
+    pointer: LoopPointer,
+    start: usize,
+}
+
+struct LoopPointer(isize);
+
+impl LoopPointer {
+    pub fn new() -> Self {
+        Self(-1)
+    }
+}
+
+impl Iterator for LoopPointer {
+    type Item = usize;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0 += 1;
+        if self.0 as usize == USER_POOL_LIMIT {
+            self.0 = 0;
+        }
+        Some(self.0 as usize)
+    }
+}
+
+impl PhysMemList {
+    pub fn new() -> Self {
+        // const VAL = PhysMemEntry::new();
+        Self {
+            list: [PhysMemEntry::new(); USER_POOL_LIMIT],
+            pointer: LoopPointer::new(),
+            start: 0,
+        }
+    }
+
+    pub fn insert_range(&mut self, start: usize) {
+        self.start = start.ceil();
+    }
+
+    pub fn clock_algorithm(&mut self) -> usize {
+        loop {
+            let index = self.pointer.next().unwrap();
+            if self.list[index].is_pinned() {}
+            if self.list[index].is_accessed() {
+                self.list[index].set_unaccessed();
+            } else {
+                return index;
+            }
+        }
+    }
+
+    pub fn evict(&mut self, va: usize, index: Option<usize>, pt_token: usize) -> usize {
+        // kprintln!("...");
+        let i = if let Some(i) = self
+            .list
+            .iter()
+            .enumerate()
+            .find(|e| !e.1.is_used())
+            .map(|e| e.0)
+        {
+            i
+        } else {
+            self.clock_algorithm()
+        };
+        // kprintln!("i: {}", i);
+        let pa = self.start + i * PG_SIZE;
+
+        let old = self.list[i].evict(va, index, pt_token);
+        if !old.is_used() {
+            return pa;
+        }
+        old.write(pa);
+        let pt = unsafe { PageTable::from_token(old.pt_token.unwrap()) };
+        pt.get_mut_pte(old.va.unwrap())
+            .unwrap()
+            .evict(old.index.unwrap());
+
+        pa
+    }
+
+    pub fn pinned_alloc(&mut self, va: usize) -> usize {
+        let i = if let Some(i) = self
+            .list
+            .iter()
+            .enumerate()
+            .find(|e| !e.1.is_used())
+            .map(|e| e.0)
+        {
+            i
+        } else {
+            unreachable!("memory is exhausted");
+        };
+        self.list[i].va = Some(va);
+        self.list[i].pinned = true;
+        self.start + i * PG_SIZE
+    }
+}
+
+pub struct PhysMemPool(Lazy<Mutex<PhysMemList, Intr>>);
+
+unsafe impl Sync for PhysMemPool {}
+
+impl PhysMemPool {
+    pub fn init(start: usize) {
+        Self::instance().lock().insert_range(start);
+    }
+
+    /// really allocate a page in physical memory, return pa
+    pub fn real_alloc(va: usize, pt_token: usize) -> usize {
+        let pt = unsafe { PageTable::from_token(pt_token) };
+        let index = pt.get_pte(va).unwrap().ppn();
+        // kprintln!("index: {}", index);
+        Self::instance().lock().evict(va, Some(index), pt_token)
+    }
+
+    pub fn pinned_alloc(va: usize) -> usize {
+        Self::instance().lock().pinned_alloc(va)
+    }
+
+    fn instance() -> &'static Mutex<PhysMemList, Intr> {
+        static PHYSMEMPOOL: PhysMemPool = PhysMemPool(Lazy::new(|| Mutex::new(PhysMemList::new())));
+
+        &PHYSMEMPOOL.0
     }
 }

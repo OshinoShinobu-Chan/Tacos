@@ -6,7 +6,7 @@ mod syscall;
 
 use crate::device::{plic, virtio};
 use crate::sbi;
-use crate::thread;
+use crate::thread::{self, current};
 use core::arch;
 
 use riscv::register::scause::{Exception::*, Interrupt::*, Trap::*};
@@ -55,6 +55,10 @@ pub extern "C" fn trap_handler(frame: &mut Frame) {
         stval,
         frame.sepc
     );
+
+    let current = current();
+    current.set_sp(frame.x[2]);
+    // kprintln!("[TRAP] Set sp to {:#x}", frame.x[2]);
 
     match scause {
         Exception(UserEnvCall) => {

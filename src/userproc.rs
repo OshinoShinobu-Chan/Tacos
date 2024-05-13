@@ -101,10 +101,12 @@ pub fn execute(mut file: File, argv: Vec<String>) -> isize {
     frame.x[2] -= frame.x[2] % 8;
     frame.x[10] = len;
     frame.x[11] = argv_base;
+    let sp = frame.x[2];
 
     thread::Builder::new(move || start(frame))
         .pagetable(pt)
         .userproc(userproc)
+        .stack(exec_info.init_sp, sp)
         .spawn()
         .id()
 }

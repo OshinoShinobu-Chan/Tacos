@@ -1,8 +1,12 @@
 mod list;
 
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
 pub use self::list::{InMemList, IterMut};
 
 use crate::mem::layout::VM_OFFSET;
+use crate::sync::{Intr, Lazy, Mutex};
 
 pub const PG_SHIFT: usize = 12;
 pub const PG_MASK: usize = (1 << PG_SHIFT) - 1;
@@ -107,5 +111,62 @@ impl PageAlign for PhysAddr {
 
     fn ceil(self) -> Self {
         PhysAddr(self.0.ceil())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum PageType {
+    Swap(Option<usize>),
+    Code,
+    Mmap((usize, usize)),
+}
+
+pub struct SupplementalPageTable {
+    list: Vec<Option<PageType>>,
+    recycled_slot: VecDeque<usize>,
+}
+
+pub static SUPPLEMENTAL_PAGETABLE: Lazy<Mutex<SupplementalPageTable, Intr>> =
+    Lazy::new(|| Mutex::new(SupplementalPageTable::new()));
+
+impl SupplementalPageTable {
+    pub fn new() -> Self {
+        Self {
+            list: Vec::new(),
+            recycled_slot: VecDeque::new(),
+        }
+    }
+
+    pub fn push(&mut self, pagetype: PageType) -> usize {
+        if !self.recycled_slot.is_empty() {
+            let index = self.recycled_slot.pop_back().unwrap();
+            self.list[index] = Some(pagetype);
+            index
+        } else {
+            self.list.push(Some(pagetype));
+            self.list.len() - 1
+        }
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        assert!(index < self.list.len());
+        assert!(self.list[index].is_some());
+        self.list[index] = None;
+        self.recycled_slot.push_front(index);
+    }
+
+    pub fn get(&self, index: usize) -> Option<PageType> {
+        self.list.get(index).unwrap().clone()
+    }
+
+    pub fn replace(&mut self, index: usize, pagetype: PageType) {
+        self.list[index].replace(pagetype);
+    }
+
+    /// alloc a page lazily, don't really alloc a page in physical memory,
+    /// return index, map this to va using map first and the evict
+    pub fn lazy_alloc(&mut self, pagetype: PageType) -> usize {
+        // push the entry to table
+        self.push(pagetype)
     }
 }
