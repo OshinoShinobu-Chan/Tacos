@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 pub use self::list::{InMemList, IterMut};
 
+use crate::fs::File;
 use crate::mem::layout::VM_OFFSET;
 use crate::sync::{Intr, Lazy, Mutex};
 
@@ -116,10 +117,15 @@ impl PageAlign for PhysAddr {
 
 #[derive(Clone, Copy)]
 pub enum PageType {
+    /// offset
     Swap(Option<usize>),
     Code,
-    Mmap((usize, usize)),
+    /// (file, offset, real_size)
+    Mmap((*mut File, usize)),
 }
+
+unsafe impl Sync for PageType {}
+unsafe impl Send for PageType {}
 
 pub struct SupplementalPageTable {
     list: Vec<Option<PageType>>,
@@ -151,6 +157,7 @@ impl SupplementalPageTable {
     pub fn remove(&mut self, index: usize) {
         assert!(index < self.list.len());
         assert!(self.list[index].is_some());
+        // TODO: if page is Swap, free the disk
         self.list[index] = None;
         self.recycled_slot.push_front(index);
     }

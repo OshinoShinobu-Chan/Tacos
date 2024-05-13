@@ -10,6 +10,8 @@ use core::fmt::{self, Debug};
 use core::sync::atomic::{AtomicIsize, AtomicU32, AtomicUsize, Ordering::SeqCst};
 
 use crate::fs::File;
+use crate::io::Seek;
+use crate::mem::pagetable::pt_check_buf_mapped;
 use crate::mem::{kalloc, kfree, PageTable, PG_SIZE};
 use crate::sbi::interrupt;
 use crate::thread::{current, Manager};
@@ -52,6 +54,8 @@ unsafe impl Sync for ThreadMut {}
 pub struct ThreadMutInner {
     fd_table: Vec<Option<(File, usize)>>,
     recycled_fd: VecDeque<usize>,
+    mmap_table: Vec<Option<(File, usize)>>,
+    recycled_slot: VecDeque<usize>,
 }
 
 pub struct ThreadInfo {
@@ -121,6 +125,8 @@ impl Thread {
                     // children: Vec::new(),
                     fd_table: Vec::new(),
                     recycled_fd: VecDeque::new(),
+                    mmap_table: Vec::new(),
+                    recycled_slot: VecDeque::new(),
                 }),
             },
         }
@@ -213,6 +219,18 @@ impl Thread {
         self.get_mut_part().replace_file(fd, file)
     }
 
+    pub fn add_mmap(&self, fd: usize, addr: usize) -> (isize, usize, Option<File>) {
+        self.get_mut_part().add_mmap(fd, addr)
+    }
+
+    pub fn remove_mmap(&self, id: usize) {
+        self.get_mut_part().remove_mmap(id)
+    }
+
+    pub fn get_mmap_by_id(&self, id: usize) -> Option<(File, usize)> {
+        self.get_mut_part().get_mmap_by_id(id)
+    }
+
     pub fn overflow(&self) -> bool {
         unsafe { (self.stack as *const usize).read() != MAGIC }
     }
@@ -248,6 +266,53 @@ impl ThreadMutInner {
         assert!(self.fd_table[index].is_some());
         let flag = self.fd_table[index].clone().unwrap().1;
         self.fd_table[index].replace((file, flag));
+    }
+
+    pub fn add_mmap(&mut self, fd: usize, addr: usize) -> (isize, usize, Option<File>) {
+        let file = {
+            if let Some((f, _)) = self.get_file(fd) {
+                f
+            } else {
+                return (-1, 0, None);
+            }
+        };
+        let size = file.len().unwrap();
+        if pt_check_buf_mapped(addr, size) {
+            return (-1, 0, None);
+        }
+        if let Some(index) = self.recycled_slot.pop_back() {
+            self.mmap_table[index] = Some((file.clone(), addr));
+            (index as isize, size, Some(file))
+        } else {
+            self.mmap_table.push(Some((file.clone(), addr)));
+            ((self.mmap_table.len() - 1) as isize, size, Some(file))
+        }
+    }
+
+    pub fn get_mmap_by_addr(&self, addr: usize) -> Option<(File, usize)> {
+        self.mmap_table
+            .iter()
+            .filter(|e| e.is_some())
+            .map(|e| e.clone().unwrap())
+            .find(|e| addr >= e.1 && addr <= e.1 + e.0.len().unwrap())
+    }
+
+    pub fn get_mmap_by_id(&self, id: usize) -> Option<(File, usize)> {
+        self.mmap_table
+            .get(id)
+            .and_then(|e| e.as_ref().and_then(|e| Some((e.0.clone(), e.1))))
+    }
+
+    pub fn remove_mmap(&mut self, id: usize) {
+        self.mmap_table.get(id).replace(&None);
+    }
+
+    pub fn get_all_mmap_id(&self) -> Vec<usize> {
+        self.mmap_table
+            .iter()
+            .enumerate()
+            .filter_map(|e| e.1.clone().and_then(|_| Some(e.0)))
+            .collect()
     }
 }
 

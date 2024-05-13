@@ -15,8 +15,13 @@ use crate::io::Read;
 use crate::io::Seek;
 use crate::io::Write;
 use crate::mem::pagetable::{
-    pt_check_buf, pt_read_user_item, pt_read_user_str, pt_write_user_item,
+    pt_check_buf, pt_read_user_item, pt_read_user_str, pt_unmap_pages, pt_write_user_item,
+    PageTable,
 };
+use crate::mem::PTEFlags;
+use crate::mem::PhysAddr;
+use crate::mem::SUPPLEMENTAL_PAGETABLE;
+use crate::mem::{PageAlign, PG_SIZE};
 use crate::sbi::{console_getchar, console_putchar};
 use crate::thread::current;
 use crate::userproc::{self, execute, wait};
@@ -391,4 +396,63 @@ fn sys_fstat(fd: usize, buf: *mut Fstat) -> isize {
         return -1;
     }
     return 0;
+}
+
+fn sys_mmap(fd: usize, addr: usize) -> isize {
+    if addr == 0 {
+        return -1;
+    }
+    if fd == 0 || fd == 1 || fd == 2 {
+        return -1;
+    }
+    if !addr.is_aligned() {
+        return -1;
+    }
+    let current = current();
+    let index;
+    let size;
+    let mut file;
+    match current.add_mmap(fd, addr) {
+        (-1, _, _) => return -1,
+        (i, s, f) => {
+            index = i;
+            size = s;
+            file = f.unwrap();
+        }
+    }
+    let mut ptr = addr;
+    let end = addr + size;
+    while ptr < end {
+        let i = SUPPLEMENTAL_PAGETABLE
+            .lock()
+            .lazy_alloc(crate::mem::PageType::Mmap((
+                core::ptr::addr_of_mut!(file),
+                ptr - addr,
+            )));
+        let mut pt = unsafe { PageTable::effective_pagetable() };
+        pt.map(
+            PhysAddr::from_pa(0),
+            ptr,
+            PG_SIZE,
+            PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U,
+        );
+        let entry = pt.get_mut_pte(ptr).unwrap();
+        entry.evict(i);
+        ptr += PG_SIZE;
+    }
+    index
+}
+
+fn sys_unmmap(id: usize) -> isize {
+    let current = current();
+    let (addr, size) = {
+        if let Some((f, addr)) = current.get_mmap_by_id(id) {
+            (addr, f.len().unwrap())
+        } else {
+            return -1;
+        }
+    };
+    current.remove_mmap(id);
+    pt_unmap_pages(addr, size);
+    0
 }

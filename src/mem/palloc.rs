@@ -2,10 +2,11 @@
 
 use core::cmp::min;
 
-use crate::device::virtio::Virtio;
-use crate::device::virtio::SECTOR_SIZE;
 use crate::fs::disk::Swap;
+use crate::fs::File;
 use crate::io::Seek;
+use crate::io::Write;
+use crate::mem::userbuf::read_user_item;
 use crate::mem::utils::*;
 use crate::mem::PageTable;
 use crate::sync::{Intr, Lazy, Mutex};
@@ -197,6 +198,15 @@ impl PhysMemEntry {
         self.pt_token = Some(pt_token);
     }
 
+    pub fn dealloc(&mut self) -> PhysMemEntry {
+        let old = self.clone();
+        self.va = None;
+        self.index = None;
+        self.pt_token = None;
+        self.pinned = false;
+        old
+    }
+
     pub fn evict(
         &mut self,
         new_va: usize,
@@ -215,30 +225,16 @@ impl PhysMemEntry {
         if !self.is_dirty() {
             return;
         }
-        let mut supplmental = SUPPLEMENTAL_PAGETABLE.lock();
+        let supplmental = SUPPLEMENTAL_PAGETABLE.lock();
         match supplmental.get(self.index.unwrap()).unwrap() {
-            PageType::Swap(Some(sector)) => {
-                // write to swap sector directly
-                for i in sector..sector + 4 {
-                    Virtio::write_sector(i as u64, unsafe {
-                        core::mem::transmute(PhysAddr::from_pa(pa).into_va() as *const u8)
-                    });
-                }
+            PageType::Swap(Some(_offset)) => {
+                // TODO: Write to the Swap file
             }
             PageType::Swap(None) => {
-                let pos = Swap::lock().pos().unwrap().clone();
-                let ino = Swap::lock().inum();
-                let sector = ino + pos / SECTOR_SIZE;
-                let pagetype: PageType = PageType::Swap(Some(sector));
-                supplmental.replace(self.index.unwrap(), pagetype);
-                for i in sector..sector + 4 {
-                    Virtio::write_sector(i as u64, unsafe {
-                        core::mem::transmute(PhysAddr::from_pa(pa).into_va() as *const u8)
-                    });
-                }
+                // TODO: Write to the Swap file and update the entry
             }
-            PageType::Mmap((_sector, _real_size)) => {
-                // TODO
+            PageType::Mmap((file, offset)) => {
+                write_mmap(file, offset, pa);
             }
             PageType::Code => unreachable!("Code segment should not be dirty!"),
         }
@@ -379,6 +375,22 @@ impl PhysMemList {
         self.list[i].pinned = true;
         self.start + i * PG_SIZE
     }
+
+    pub fn dealloc(&mut self, pa: usize) {
+        let index = (pa - self.start) / PG_SIZE;
+        let old = self.list[index].dealloc();
+        let index = old.get_index().unwrap();
+        let mut supplmental = SUPPLEMENTAL_PAGETABLE.lock();
+        match supplmental.get(index).unwrap() {
+            PageType::Mmap((file, offset)) => {
+                write_mmap(file, offset, pa);
+            }
+            _ => {
+                // other situation don't need to write back to disk when dealloc
+            }
+        }
+        supplmental.remove(index);
+    }
 }
 
 pub struct PhysMemPool(Lazy<Mutex<PhysMemList, Intr>>);
@@ -402,9 +414,23 @@ impl PhysMemPool {
         Self::instance().lock().pinned_alloc(va)
     }
 
+    pub fn dealloc(pa: usize) {
+        Self::instance().lock().dealloc(pa)
+    }
+
     fn instance() -> &'static Mutex<PhysMemList, Intr> {
         static PHYSMEMPOOL: PhysMemPool = PhysMemPool(Lazy::new(|| Mutex::new(PhysMemList::new())));
 
         &PHYSMEMPOOL.0
+    }
+}
+
+fn write_mmap(file: *mut File, offset: usize, pa: usize) {
+    let file = unsafe { file.as_mut().unwrap() };
+    file.seek(crate::io::SeekFrom::Start(offset)).unwrap();
+    let size = (file.len().unwrap() - offset).min(PG_SIZE);
+    for ptr in pa..(pa + size) {
+        let b = read_user_item(ptr as *const u8).unwrap();
+        file.write_from(b).unwrap();
     }
 }

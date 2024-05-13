@@ -55,7 +55,11 @@ impl Entry {
     }
 
     pub fn set_off_disk(&mut self) {
-        self.0 = self.0 & !(1 << 8);
+        self.0 &= !(1 << 8);
+    }
+
+    pub fn is_mapped(&self) -> bool {
+        self.is_valid() || self.on_disk()
     }
 
     /// Physical address where the entry maps to

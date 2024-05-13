@@ -83,6 +83,26 @@ impl PageTable {
         }
     }
 
+    pub fn unmap_pages(&mut self, va: usize, size: usize) {
+        assert!(va.is_aligned(), "address misaligns");
+
+        let mut ptr = va;
+        let end = va + size;
+        while ptr < end {
+            if let Some(pte) = self.get_mut_pte(va) {
+                if pte.is_valid() {
+                    PhysMemPool::dealloc(pte.pa().value() + VM_OFFSET);
+                    pte.set_invalid();
+                } else if pte.on_disk() {
+                    let index = pte.ppn();
+                    SUPPLEMENTAL_PAGETABLE.lock().remove(index);
+                    pte.set_off_disk();
+                }
+            }
+            ptr += PG_SIZE;
+        }
+    }
+
     /// Finds the corresponding entry by the given virtual address
     pub fn get_pte(&self, va: usize) -> Option<&Entry> {
         self.walk(Self::px(2, va)).and_then(|l1_table| {
@@ -198,6 +218,21 @@ impl PageTable {
             ptr += PG_SIZE.min((ptr + 1).ceil() - ptr);
         }
         Ok(())
+    }
+
+    pub fn check_buf_mapped(&mut self, va: usize, size: usize) -> bool {
+        let mut ptr = va;
+        let end = va + size;
+        while ptr < end {
+            let _ = self.translate_va(ptr);
+            if let Some(pte) = self.get_pte(va.floor()) {
+                if pte.is_mapped() {
+                    return true;
+                }
+            }
+            ptr += PG_SIZE.min((ptr + 1).ceil() - ptr);
+        }
+        false
     }
 
     pub fn write_user_str(&mut self, va: usize, string: &String) -> Result<()> {
@@ -323,6 +358,16 @@ pub fn pt_write_user_item<T: Sized>(va: usize, item: &T) -> Result<()> {
 pub fn pt_check_buf(va: usize, size: usize) -> Result<()> {
     let mut pt = unsafe { PageTable::effective_pagetable() };
     pt.check_buf(va, size)
+}
+
+pub fn pt_check_buf_mapped(va: usize, size: usize) -> bool {
+    let mut pt = unsafe { PageTable::effective_pagetable() };
+    pt.check_buf_mapped(va, size)
+}
+
+pub fn pt_unmap_pages(va: usize, size: usize) {
+    let mut pt = unsafe { PageTable::effective_pagetable() };
+    pt.unmap_pages(va, size)
 }
 
 pub struct KernelPgTable(OnceCell<PageTable>);

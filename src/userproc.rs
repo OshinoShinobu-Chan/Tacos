@@ -115,7 +115,7 @@ pub fn execute(mut file: File, argv: Vec<String>) -> isize {
 ///
 /// Panic if the current thread doesn't own a user process.
 pub fn exit(value: isize) -> ! {
-    // TODO: Lab2.
+    // TODO: unmmap all
     let current = current();
     let parent = current.userproc.lock().as_ref().unwrap().parent.clone();
     let parent = parent.upgrade();
@@ -132,7 +132,6 @@ pub fn exit(value: isize) -> ! {
 /// - `Some(exit_value)`
 /// - `None`: if tid was not created by the current thread.
 pub fn wait(tid: isize) -> Option<isize> {
-    // TODO: Lab2.
     let current = current();
     loop {
         if let Some(is_dead) = current.check_child(tid as usize) {
