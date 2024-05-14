@@ -231,6 +231,10 @@ impl Thread {
         self.get_mut_part().get_mmap_by_id(id)
     }
 
+    pub fn get_all_mmap_id(&self) -> Vec<usize> {
+        self.get_mut_part().get_all_mmap_id()
+    }
+
     pub fn overflow(&self) -> bool {
         unsafe { (self.stack as *const usize).read() != MAGIC }
     }

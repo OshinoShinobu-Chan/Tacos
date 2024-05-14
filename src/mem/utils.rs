@@ -115,13 +115,13 @@ impl PageAlign for PhysAddr {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum PageType {
     /// offset
     Swap(Option<usize>),
     Code,
-    /// (file, offset, real_size)
-    Mmap((*mut File, usize)),
+    /// (file, offset)
+    Mmap((File, usize)),
 }
 
 unsafe impl Sync for PageType {}

@@ -20,7 +20,9 @@ void main() {
     assert(mmap(fd, buf) != MAP_FAILED, "mmap \"buffer\"");
 
     /* Initialize. */
-    for (i = 0; i < SIZE; i++) buf[i] = i * 257;
+    for (i = 0; i < SIZE; i++) {
+        buf[i] = i * 257;
+    }
     printf("init: cksum=%d", cksum(buf, SIZE));
 
     /* Shuffle repeatedly. */

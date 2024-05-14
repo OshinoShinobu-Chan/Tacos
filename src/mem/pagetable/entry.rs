@@ -51,7 +51,7 @@ impl Entry {
     }
 
     pub fn on_disk(&self) -> bool {
-        (self.0 & 1 << 8) == 1
+        (self.0 & 1 << 8) != 0
     }
 
     pub fn set_off_disk(&mut self) {

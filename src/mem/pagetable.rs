@@ -22,6 +22,7 @@
 mod entry;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::ptr;
 use core::{arch::asm, mem::transmute};
 
@@ -29,7 +30,7 @@ use crate::error::OsError;
 use crate::mem::{
     layout::{MMIO_BASE, PLIC_BASE, VM_BASE},
     malloc::{kalloc, kfree},
-    palloc::{PhysMemPool, UserPool},
+    palloc::PhysMemPool,
     userbuf::{read_user_item, write_user_item, write_user_str},
     utils::{PageAlign, PhysAddr, PG_SIZE},
 };
@@ -204,6 +205,21 @@ impl PageTable {
         read_user_item(pa as *const T)
     }
 
+    pub fn read_user_buf(&mut self, va: usize, size: usize) -> Result<Vec<&'static [u8]>> {
+        let mut out = Vec::new();
+        let mut ptr = va;
+        let end = ptr + size;
+        while ptr < end {
+            let len = ((ptr + PG_SIZE).floor() - ptr).min(end - ptr);
+            let pa = self.translate_va(ptr)?;
+            let buf = unsafe { core::slice::from_raw_parts(pa as *const u8, len) };
+            out.push(buf);
+            ptr += len;
+        }
+
+        Ok(out)
+    }
+
     pub fn check_buf(&mut self, va: usize, size: usize) -> Result<()> {
         if va == 0 {
             return Err(OsError::BadPtr);
@@ -247,6 +263,21 @@ impl PageTable {
         write_user_item(pa as *mut T, item)
     }
 
+    pub fn write_user_buf(&mut self, va: usize, size: usize) -> Result<Vec<&'static mut [u8]>> {
+        let mut out = Vec::new();
+        let mut ptr = va;
+        let end = ptr + size;
+        while ptr < end {
+            let len = ((ptr + PG_SIZE).floor() - ptr).min(end - ptr);
+            let pa = self.translate_va(ptr)?;
+            let buf = unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, len) };
+            out.push(buf);
+            ptr += len;
+        }
+
+        Ok(out)
+    }
+
     /// Free all memory used by this pagetable back to where they were allocated.
     pub unsafe fn destroy(&mut self) {
         unsafe fn destroy_imp(pgt: &mut PageTable, level: usize) {
@@ -254,11 +285,18 @@ impl PageTable {
 
             pgt.entries
                 .iter()
-                .filter(|entry| entry.is_valid() && !entry.is_global())
+                .filter(|entry| (entry.is_valid() || entry.on_disk()) && !entry.is_global())
                 .for_each(|entry| {
                     let va = entry.pa().into_va();
                     if entry.is_leaf() {
-                        UserPool::dealloc_pages(va as *mut _, 1 << (9 * level));
+                        if entry.is_valid() {
+                            // UserPool::dealloc_pages(va as *mut _, 1 << (9 * level));
+                            PhysMemPool::dealloc(va);
+                        } else if entry.on_disk() {
+                            // TODO: dealloc the page in supplemental pagetable
+                            let index = entry.ppn();
+                            SUPPLEMENTAL_PAGETABLE.lock().remove(index);
+                        }
                     } else {
                         destroy_imp(&mut PageTable::from_raw(va as *mut _), level - 1);
                     }
@@ -368,6 +406,16 @@ pub fn pt_check_buf_mapped(va: usize, size: usize) -> bool {
 pub fn pt_unmap_pages(va: usize, size: usize) {
     let mut pt = unsafe { PageTable::effective_pagetable() };
     pt.unmap_pages(va, size)
+}
+
+pub fn pt_read_user_buf(va: usize, size: usize) -> Result<Vec<&'static [u8]>> {
+    let mut pt = unsafe { PageTable::effective_pagetable() };
+    pt.read_user_buf(va, size)
+}
+
+pub fn pt_write_user_buf(va: usize, size: usize) -> Result<Vec<&'static mut [u8]>> {
+    let mut pt = unsafe { PageTable::effective_pagetable() };
+    pt.write_user_buf(va, size)
 }
 
 pub struct KernelPgTable(OnceCell<PageTable>);

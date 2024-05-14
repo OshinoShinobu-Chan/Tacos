@@ -15,9 +15,10 @@ use crate::io::Read;
 use crate::io::Seek;
 use crate::io::Write;
 use crate::mem::pagetable::{
-    pt_check_buf, pt_read_user_item, pt_read_user_str, pt_unmap_pages, pt_write_user_item,
-    PageTable,
+    pt_check_buf, pt_read_user_item, pt_read_user_str, pt_unmap_pages, pt_write_user_buf,
+    pt_write_user_item, PageTable,
 };
+use crate::mem::pt_read_user_buf;
 use crate::mem::PTEFlags;
 use crate::mem::PhysAddr;
 use crate::mem::SUPPLEMENTAL_PAGETABLE;
@@ -39,6 +40,8 @@ const SYS_SEEK: usize = 9;
 const SYS_TELL: usize = 10;
 const SYS_CLOSE: usize = 11;
 const SYS_FSTAT: usize = 12;
+const SYS_MMAP: usize = 13;
+const SYS_MUNMAP: usize = 14;
 
 const O_RDONLY: usize = 0x0;
 const O_WRONLY: usize = 0x1;
@@ -67,6 +70,8 @@ pub fn syscall_handler(id: usize, args: [usize; 3]) -> isize {
         SYS_CLOSE => sys_close(args[0]),
         SYS_TELL => sys_tell(args[0]),
         SYS_FSTAT => sys_fstat(args[0], args[1] as *mut Fstat),
+        SYS_MMAP => sys_mmap(args[0], args[1]),
+        SYS_MUNMAP => sys_unmmap(args[0]),
         _ => panic!("Unsupported syscall!"),
     }
 }
@@ -225,16 +230,25 @@ fn sys_read(fd: usize, buf: *const u8, size: usize) -> isize {
         if pt_check_buf(buf as usize, size).is_err() {
             return -1;
         }
-        for i in 0..size {
-            let b: Result<u8, crate::OsError> = file.read_into();
-            if b.is_err() {
-                current.replace_file(fd, file);
-                return i as isize;
-            }
-            if pt_write_user_item(ptr as usize, b.as_ref().unwrap()).is_err() {
+        let bufs = {
+            if let Ok(b) = pt_write_user_buf(buf as usize, size) {
+                b
+            } else {
                 return -1;
             }
-            unsafe { ptr = ptr.add(1) };
+        };
+        let mut size = 0 as usize;
+        for buf in bufs {
+            match file.read(buf) {
+                Ok(s) => {
+                    // kprintln!("read: {}", s);
+                    size += s;
+                    if buf.len() > s {
+                        break;
+                    }
+                }
+                Err(_) => return -1,
+            }
         }
         current.replace_file(fd, file);
         size as isize
@@ -289,34 +303,24 @@ fn sys_write(fd: usize, buf: *const u8, size: usize) -> isize {
             }
             f
         };
-        if pt_check_buf(buf as usize, size).is_err() {
-            return -1;
-        }
-        for i in 0..size {
-            let b: u8 = {
-                let b = pt_read_user_item(ptr as usize);
-                if b.is_err() {
-                    return -1;
-                } else {
-                    b.unwrap()
-                }
-            };
-            // if file.write_from(b).is_err() {
-            //     current.replace_file(fd, file);
-            //     return i as isize;
-            // }
-            match file.write_from(b) {
-                Ok(()) => {}
-                Err(crate::OsError::UnexpectedEOF) => {
-                    current.replace_file(fd, file);
-                    return i as isize;
-                }
-                Err(_) => {
-                    current.replace_file(fd, file);
-                    return -1;
-                }
+        let bufs = {
+            if let Ok(b) = pt_read_user_buf(buf as usize, size) {
+                b
+            } else {
+                return -1;
             }
-            unsafe { ptr = ptr.add(1) };
+        };
+        let mut size: usize = 0;
+        for buf in bufs {
+            match file.write(buf) {
+                Ok(s) => {
+                    size += s;
+                    if buf.len() > s {
+                        break;
+                    }
+                }
+                Err(_) => return -1,
+            }
         }
         current.replace_file(fd, file);
         size as isize
@@ -411,7 +415,7 @@ fn sys_mmap(fd: usize, addr: usize) -> isize {
     let current = current();
     let index;
     let size;
-    let mut file;
+    let file;
     match current.add_mmap(fd, addr) {
         (-1, _, _) => return -1,
         (i, s, f) => {
@@ -425,10 +429,7 @@ fn sys_mmap(fd: usize, addr: usize) -> isize {
     while ptr < end {
         let i = SUPPLEMENTAL_PAGETABLE
             .lock()
-            .lazy_alloc(crate::mem::PageType::Mmap((
-                core::ptr::addr_of_mut!(file),
-                ptr - addr,
-            )));
+            .lazy_alloc(crate::mem::PageType::Mmap((file.clone(), ptr - addr)));
         let mut pt = unsafe { PageTable::effective_pagetable() };
         pt.map(
             PhysAddr::from_pa(0),
@@ -443,7 +444,7 @@ fn sys_mmap(fd: usize, addr: usize) -> isize {
     index
 }
 
-fn sys_unmmap(id: usize) -> isize {
+pub fn sys_unmmap(id: usize) -> isize {
     let current = current();
     let (addr, size) = {
         if let Some((f, addr)) = current.get_mmap_by_id(id) {

@@ -1,3 +1,5 @@
+use crate::fs::File;
+use crate::io::{Read, Seek};
 use crate::mem::palloc::PhysMemPool;
 use crate::mem::userbuf::{
     __knrl_read_usr_byte_pc, __knrl_read_usr_exit, __knrl_write_usr_byte_pc, __knrl_write_usr_exit,
@@ -15,9 +17,9 @@ use riscv::register::sstatus::{self, SPP};
 #[derive(Debug)]
 enum HandleType {
     StackGrowth,
-    Swap,
+    Swap(usize),
     Code,
-    Mmap,
+    Mmap((File, usize)),
     Error,
 }
 
@@ -69,9 +71,9 @@ pub fn handler(frame: &mut Frame, fault: Exception, addr: usize) {
         }
         let entry = entry.unwrap();
         match entry {
-            crate::mem::PageType::Swap(_) => HandleType::Swap,
+            crate::mem::PageType::Swap(x) => HandleType::Swap(x.unwrap()),
             crate::mem::PageType::Code => HandleType::Code,
-            crate::mem::PageType::Mmap(_) => HandleType::Mmap,
+            crate::mem::PageType::Mmap(x) => HandleType::Mmap(x),
         }
     };
 
@@ -84,6 +86,7 @@ pub fn handler(frame: &mut Frame, fault: Exception, addr: usize) {
         addr
     );
 
+    let token = unsafe { PageTable::get_token() };
     // handle the pagefault by handletype
     match handletype {
         HandleType::StackGrowth => {
@@ -99,7 +102,6 @@ pub fn handler(frame: &mut Frame, fault: Exception, addr: usize) {
             );
             let entry = table.get_mut_pte(addr).unwrap();
             entry.evict(index);
-            let token = unsafe { PageTable::get_token() };
             // kprintln!("pagetable token: {:#x}", token);
             let pa = PhysMemPool::real_alloc(addr.floor(), token) - VM_OFFSET;
             table.map(
@@ -116,13 +118,32 @@ pub fn handler(frame: &mut Frame, fault: Exception, addr: usize) {
             );
             return;
         }
-        HandleType::Mmap => {
-            // TODO
+        HandleType::Mmap((mut file, offset)) => {
+            let pa = PhysMemPool::real_alloc(addr.floor(), token);
+            // read mmap back to memory
+            file.seek(crate::io::SeekFrom::Start(offset)).unwrap();
+            let size = (file.len().unwrap() - offset).min(PG_SIZE);
+            let buf = unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, size) };
+            file.read(buf).unwrap();
+
+            table.map(
+                PhysAddr::from_pa(pa - VM_OFFSET),
+                addr.floor(),
+                PG_SIZE,
+                PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U,
+            );
+            kprintln!(
+                "mmap page {:#x}-{:x}, pa: {:#x}",
+                addr.floor(),
+                addr.floor() + PG_SIZE,
+                pa - VM_OFFSET,
+            );
+            return;
         }
         HandleType::Code => {
             // TODO
         }
-        HandleType::Swap => {
+        HandleType::Swap(_offset) => {
             // TODO
         }
         HandleType::Error => {}

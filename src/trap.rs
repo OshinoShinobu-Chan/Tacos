@@ -4,6 +4,8 @@
 mod pagefault;
 mod syscall;
 
+pub use self::syscall::sys_unmmap;
+
 use crate::device::{plic, virtio};
 use crate::sbi;
 use crate::thread::{self, current};

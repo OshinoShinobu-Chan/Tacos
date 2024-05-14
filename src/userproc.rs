@@ -13,7 +13,7 @@ use riscv::register::sstatus;
 use crate::fs::File;
 use crate::mem::pagetable::KernelPgTable;
 use crate::thread::{self, current, schedule, Thread};
-use crate::trap::{trap_exit_u, Frame};
+use crate::trap::{sys_unmmap, trap_exit_u, Frame};
 
 pub struct UserProc {
     #[allow(dead_code)]
@@ -115,8 +115,11 @@ pub fn execute(mut file: File, argv: Vec<String>) -> isize {
 ///
 /// Panic if the current thread doesn't own a user process.
 pub fn exit(value: isize) -> ! {
-    // TODO: unmmap all
     let current = current();
+    let mmap_ids = current.get_all_mmap_id();
+    for id in mmap_ids {
+        sys_unmmap(id);
+    }
     let parent = current.userproc.lock().as_ref().unwrap().parent.clone();
     let parent = parent.upgrade();
     if let Some(parent) = parent {

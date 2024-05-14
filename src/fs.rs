@@ -136,3 +136,9 @@ impl Drop for File {
         }
     }
 }
+
+impl core::fmt::Debug for File {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "File")
+    }
+}

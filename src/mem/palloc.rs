@@ -2,11 +2,10 @@
 
 use core::cmp::min;
 
-use crate::fs::disk::Swap;
+// use crate::fs::disk::Swap;
 use crate::fs::File;
 use crate::io::Seek;
 use crate::io::Write;
-use crate::mem::userbuf::read_user_item;
 use crate::mem::utils::*;
 use crate::mem::PageTable;
 use crate::sync::{Intr, Lazy, Mutex};
@@ -222,7 +221,7 @@ impl PhysMemEntry {
 
     pub fn write(&self, pa: usize) {
         // write the content back
-        if !self.is_dirty() {
+        if !self.is_dirty(pa) {
             return;
         }
         let supplmental = SUPPLEMENTAL_PAGETABLE.lock();
@@ -256,9 +255,11 @@ impl PhysMemEntry {
         self.va.is_some()
     }
 
-    pub fn is_dirty(&self) -> bool {
+    pub fn is_dirty(&self, _pa: usize) -> bool {
         let pt = unsafe { PageTable::from_token(self.pt_token.unwrap()) };
         let pte = pt.get_pte(self.va.unwrap()).unwrap();
+        // TODO: check modification from kernel
+        // let kpte = pt.get_pte(pa).unwrap();
         pte.is_dirty()
     }
 
@@ -383,7 +384,9 @@ impl PhysMemList {
         let mut supplmental = SUPPLEMENTAL_PAGETABLE.lock();
         match supplmental.get(index).unwrap() {
             PageType::Mmap((file, offset)) => {
-                write_mmap(file, offset, pa);
+                if old.is_dirty(pa) {
+                    write_mmap(file, offset, pa);
+                }
             }
             _ => {
                 // other situation don't need to write back to disk when dealloc
@@ -425,12 +428,9 @@ impl PhysMemPool {
     }
 }
 
-fn write_mmap(file: *mut File, offset: usize, pa: usize) {
-    let file = unsafe { file.as_mut().unwrap() };
+pub fn write_mmap(mut file: File, offset: usize, pa: usize) {
     file.seek(crate::io::SeekFrom::Start(offset)).unwrap();
     let size = (file.len().unwrap() - offset).min(PG_SIZE);
-    for ptr in pa..(pa + size) {
-        let b = read_user_item(ptr as *const u8).unwrap();
-        file.write_from(b).unwrap();
-    }
+    let buf = unsafe { core::slice::from_raw_parts(pa as *const u8, size) };
+    file.write(buf).unwrap();
 }
