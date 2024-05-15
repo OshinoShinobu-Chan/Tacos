@@ -159,6 +159,7 @@ fn sys_open(path: *const u8, flag: usize) -> isize {
         }
     };
     let mut mark: usize = 0;
+    kprintln!("flag: {}", flag);
     if Path::exists(Path::from(path_str.clone().as_str())) {
         mark += 1;
     }

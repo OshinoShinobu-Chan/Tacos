@@ -25,7 +25,8 @@ void main() {
     int fd2;
     char buf[4096 * 8];
     assert((fd2 = open("another", O_CREATE | O_TRUNC | O_WRONLY)));
-    assert(write(fd2, buf, 4096 * 8) == 4096 * 8);
+    int size = write(fd2, buf, 4096 * 8);
+    assert(size == 4096 * 8);
 
     /* Check that mapped data is correct. */
     if (memcmp(actual, sample, strlen(sample))) panic("read of mmap'd file reported bad data");

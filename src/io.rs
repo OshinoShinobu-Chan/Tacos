@@ -76,6 +76,8 @@ pub trait Write {
     /// - `Err`: something unexpected happened.
     fn write(&mut self, buf: &[u8]) -> Result<usize>;
 
+    fn force_write(&mut self, buf: &[u8]) -> Result<usize>;
+
     /// Flush any buffered bytes to its destination
     fn flush(&mut self) -> Result<()>;
 

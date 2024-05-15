@@ -2,7 +2,7 @@
 
 use core::cmp::min;
 
-// use crate::fs::disk::Swap;
+use crate::fs::disk::Swap;
 use crate::fs::File;
 use crate::io::Seek;
 use crate::io::Write;
@@ -226,16 +226,21 @@ impl PhysMemEntry {
         }
         let supplmental = SUPPLEMENTAL_PAGETABLE.lock();
         match supplmental.get(self.index.unwrap()).unwrap() {
-            PageType::Swap(Some(_offset)) => {
-                // TODO: Write to the Swap file
+            PageType::Swap(Some(offset)) => {
+                write_swap(offset, pa);
             }
             PageType::Swap(None) => {
                 // TODO: Write to the Swap file and update the entry
+                unreachable!("write back to swap for the first time is incompleted!");
             }
             PageType::Mmap((file, offset)) => {
                 write_mmap(file, offset, pa);
             }
-            PageType::Code => unreachable!("Code segment should not be dirty!"),
+            PageType::Code(_) => {
+                // write_code(file, offset, pa, readsz);
+                unreachable!("should not write to code");
+                // panic!("write to code");
+            }
         }
     }
 
@@ -322,7 +327,9 @@ impl PhysMemList {
     pub fn clock_algorithm(&mut self) -> usize {
         loop {
             let index = self.pointer.next().unwrap();
-            if self.list[index].is_pinned() {}
+            if self.list[index].is_pinned() {
+                continue;
+            }
             if self.list[index].is_accessed() {
                 self.list[index].set_unaccessed();
             } else {
@@ -432,5 +439,13 @@ pub fn write_mmap(mut file: File, offset: usize, pa: usize) {
     file.seek(crate::io::SeekFrom::Start(offset)).unwrap();
     let size = (file.len().unwrap() - offset).min(PG_SIZE);
     let buf = unsafe { core::slice::from_raw_parts(pa as *const u8, size) };
+    file.write(buf).unwrap();
+}
+
+pub fn write_swap(offset: usize, pa: usize) {
+    let mut file = Swap::lock();
+    file.seek(crate::io::SeekFrom::Start(offset)).unwrap();
+    // let size = (file.len().unwrap() - offset).min(PG_SIZE);
+    let buf = unsafe { core::slice::from_raw_parts(pa as *const u8, PG_SIZE) };
     file.write(buf).unwrap();
 }

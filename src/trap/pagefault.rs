@@ -1,3 +1,4 @@
+use crate::fs::disk::Swap;
 use crate::fs::File;
 use crate::io::{Read, Seek};
 use crate::mem::palloc::PhysMemPool;
@@ -18,7 +19,7 @@ use riscv::register::sstatus::{self, SPP};
 enum HandleType {
     StackGrowth,
     Swap(usize),
-    Code,
+    Code((File, usize, usize)),
     Mmap((File, usize)),
     Error,
 }
@@ -72,19 +73,19 @@ pub fn handler(frame: &mut Frame, fault: Exception, addr: usize) {
         let entry = entry.unwrap();
         match entry {
             crate::mem::PageType::Swap(x) => HandleType::Swap(x.unwrap()),
-            crate::mem::PageType::Code => HandleType::Code,
+            crate::mem::PageType::Code(x) => HandleType::Code(x),
             crate::mem::PageType::Mmap(x) => HandleType::Mmap(x),
         }
     };
 
     let handletype = f();
-    kprintln!(
-        "handletype: {:?}, sp: {:#x}, bp: {:#x}, addr: {:#x}",
-        handletype,
-        current.get_sp(),
-        current.get_bp(),
-        addr
-    );
+    // kprintln!(
+    //     "handletype: {:?}, sp: {:#x}, bp: {:#x}, addr: {:#x}",
+    //     handletype,
+    //     current.get_sp(),
+    //     current.get_bp(),
+    //     addr
+    // );
 
     let token = unsafe { PageTable::get_token() };
     // handle the pagefault by handletype
@@ -110,12 +111,12 @@ pub fn handler(frame: &mut Frame, fault: Exception, addr: usize) {
                 PG_SIZE,
                 PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U,
             );
-            kprintln!(
-                "expand page {:#x}-{:x}, pa: {:#x}",
-                addr.floor(),
-                addr.floor() + PG_SIZE,
-                pa,
-            );
+            // kprintln!(
+            //     "expand page {:#x}-{:#x}, pa: {:#x}",
+            //     addr.floor(),
+            //     addr.floor() + PG_SIZE,
+            //     pa,
+            // );
             return;
         }
         HandleType::Mmap((mut file, offset)) => {
@@ -123,8 +124,9 @@ pub fn handler(frame: &mut Frame, fault: Exception, addr: usize) {
             // read mmap back to memory
             file.seek(crate::io::SeekFrom::Start(offset)).unwrap();
             let size = (file.len().unwrap() - offset).min(PG_SIZE);
-            let buf = unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, size) };
-            file.read(buf).unwrap();
+            let buf = unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, PG_SIZE) };
+            file.read(&mut buf[..size]).unwrap();
+            buf[size..].fill(0);
 
             table.map(
                 PhysAddr::from_pa(pa - VM_OFFSET),
@@ -132,19 +134,55 @@ pub fn handler(frame: &mut Frame, fault: Exception, addr: usize) {
                 PG_SIZE,
                 PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U,
             );
-            kprintln!(
-                "mmap page {:#x}-{:x}, pa: {:#x}",
-                addr.floor(),
-                addr.floor() + PG_SIZE,
-                pa - VM_OFFSET,
-            );
+            // kprintln!(
+            //     "mmap page {:#x}-{:#x}, pa: {:#x}",
+            //     addr.floor(),
+            //     addr.floor() + PG_SIZE,
+            //     pa - VM_OFFSET,
+            // );
             return;
         }
-        HandleType::Code => {
+        HandleType::Code((mut file, offset, readsz)) => {
             // TODO
+            let pa = PhysMemPool::real_alloc(addr.floor(), token);
+            // read from code back to memory
+            file.seek(crate::io::SeekFrom::Start(offset)).unwrap();
+            let buf = unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, PG_SIZE) };
+            file.read(&mut buf[..readsz]).unwrap();
+            buf[readsz..].fill(0);
+            let flag = table.get_pte(addr).unwrap().flag();
+
+            table.map(
+                PhysAddr::from_pa(pa - VM_OFFSET),
+                addr.floor(),
+                PG_SIZE,
+                flag | PTEFlags::V,
+            );
+            // kprintln!(
+            //     "load code {:#x}-{:x}, pa: {:#x}",
+            //     addr.floor(),
+            //     addr.floor() + PG_SIZE,
+            //     pa - VM_OFFSET,
+            // );
+            return;
         }
-        HandleType::Swap(_offset) => {
-            // TODO
+        HandleType::Swap(offset) => {
+            // kprintln!("pagefault caused by swap!");
+            let pa = PhysMemPool::real_alloc(addr.floor(), token);
+            // read from swap back to memory
+            let mut swap = Swap::lock();
+            swap.seek(crate::io::SeekFrom::Start(offset)).unwrap();
+            let buf = unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, PG_SIZE) };
+            swap.read(buf).unwrap();
+            let flag = table.get_pte(addr).unwrap().flag();
+
+            table.map(
+                PhysAddr::from_pa(pa - VM_OFFSET),
+                addr.floor(),
+                PG_SIZE,
+                flag | PTEFlags::V,
+            );
+            return;
         }
         HandleType::Error => {}
     }

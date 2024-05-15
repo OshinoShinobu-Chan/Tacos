@@ -27,6 +27,8 @@ use core::ptr;
 use core::{arch::asm, mem::transmute};
 
 use crate::error::OsError;
+use crate::fs::disk::Swap;
+use crate::io::prelude::*;
 use crate::mem::{
     layout::{MMIO_BASE, PLIC_BASE, VM_BASE},
     malloc::{kalloc, kfree},
@@ -145,6 +147,54 @@ impl PageTable {
         let pa = self.try_translate_va(va);
         if pa.is_ok() {
             return pa;
+        }
+        // decide if it is on disk
+        if let Some(pte) = self.get_pte(va.floor()) {
+            if pte.on_disk() {
+                let index = pte.ppn();
+                let entry = SUPPLEMENTAL_PAGETABLE.lock().get(index);
+                match entry {
+                    Some(crate::mem::PageType::Swap(Some(offset))) => {
+                        let pa = PhysMemPool::real_alloc(va.floor(), unsafe { Self::get_token() });
+                        // read from swap back to memory
+                        let mut swap = Swap::lock();
+                        swap.seek(crate::io::SeekFrom::Start(offset)).unwrap();
+                        let buf =
+                            unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, PG_SIZE) };
+                        swap.read(buf).unwrap();
+                        let flag = self.get_pte(va).unwrap().flag();
+
+                        self.map(
+                            PhysAddr::from_pa(pa - VM_OFFSET),
+                            va.floor(),
+                            PG_SIZE,
+                            flag | PTEFlags::V,
+                        );
+                        let offset = va - va.floor();
+                        return Ok(pa + offset);
+                    }
+                    Some(crate::mem::PageType::Code((mut file, offset, readsz))) => {
+                        let pa = PhysMemPool::real_alloc(va.floor(), unsafe { Self::get_token() });
+                        // read from code back to memory
+                        file.seek(crate::io::SeekFrom::Start(offset)).unwrap();
+                        let buf =
+                            unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, PG_SIZE) };
+                        file.read(&mut buf[..readsz]).unwrap();
+                        buf[readsz..].fill(0);
+                        let flag = self.get_pte(va).unwrap().flag();
+
+                        self.map(
+                            PhysAddr::from_pa(pa - VM_OFFSET),
+                            va.floor(),
+                            PG_SIZE,
+                            flag | PTEFlags::V,
+                        );
+                        let offset = va - va.floor();
+                        return Ok(pa + offset);
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // decide if it is stack growth

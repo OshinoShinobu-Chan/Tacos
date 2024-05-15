@@ -9,7 +9,7 @@ use crate::fs::Vnode;
 use crate::{OsError, Result};
 
 /// Disk sector free bitmap.
-pub(super) struct FreeMap {
+pub struct FreeMap {
     size: u32,
     bits: Box<[u8]>,
 }
@@ -38,7 +38,7 @@ impl FreeMap {
     }
 
     // Load from the disk.
-    pub(super) fn load(size: u32) -> Result<Self> {
+    pub fn load(size: u32) -> Result<Self> {
         let inode = Inode::open(FREE_MAP_SECTOR)?;
         let len = inode.len();
         assert!(len == (size as usize + 7) / 8);
@@ -51,23 +51,23 @@ impl FreeMap {
     }
 
     // Flush to the disk.
-    pub(super) fn flush(&self) -> Result<()> {
+    pub fn flush(&self) -> Result<()> {
         let inode = Inode::open(FREE_MAP_SECTOR)?;
         inode.write_at(&self.bits, 0)?;
         Ok(())
     }
 
-    fn get(&self, sector: Inum) -> bool {
+    pub fn get(&self, sector: Inum) -> bool {
         assert!(sector < self.size);
         self.bits[sector as usize / 8] & (1 << sector % 8) != 0
     }
 
-    fn set(&mut self, sector: Inum) {
+    pub fn set(&mut self, sector: Inum) {
         assert!(sector < self.size);
         self.bits[sector as usize / 8] |= 1 << sector % 8;
     }
 
-    fn reset(&mut self, sector: Inum) {
+    pub fn reset(&mut self, sector: Inum) {
         assert!(sector < self.size);
         self.bits[sector as usize / 8] &= !(1 << sector % 8);
     }

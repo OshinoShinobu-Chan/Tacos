@@ -196,6 +196,14 @@ impl Vnode for Inode {
         self.0.lock().0.sector as usize
     }
 
+    fn start(&self) -> usize {
+        let guard = self.0.lock();
+        let (_, data) = &*guard;
+
+        let start = data.inner.start;
+        start as usize
+    }
+
     fn len(&self) -> usize {
         self.0.lock().1.inner.len as _
     }
@@ -258,6 +266,65 @@ impl Vnode for Inode {
             return Err(OsError::InvalidFileMode);
         }
 
+        let mut bytes_written = 0;
+        let mut buf_left = buf.len();
+
+        // We must acquire lock during the whole process
+        // to avoid being resized by other threads.
+        let mut guard = self.0.lock();
+        let (desc, data) = &mut *guard;
+
+        let mut start = data.inner.start;
+        let mut len = data.inner.len as usize;
+
+        if len < off + buf.len() {
+            let newlen = off + buf.len();
+            Self::resize_inner(desc, data, newlen)?;
+            start = data.inner.start;
+            len = data.inner.len as usize;
+        }
+
+        loop {
+            let sector = start as usize + off / SECTOR_SIZE;
+            let sector_offset = off % SECTOR_SIZE;
+
+            let inode_left = len.saturating_sub(off);
+            let sector_left = SECTOR_SIZE - sector_offset;
+            let chunk_size = cmp::min(cmp::min(inode_left, sector_left), buf_left);
+            if chunk_size == 0 {
+                break;
+            }
+
+            let page_off = (buf.as_ptr() as usize + bytes_written) & PG_MASK;
+
+            if (chunk_size == SECTOR_SIZE) && (page_off <= PG_SIZE - SECTOR_SIZE) {
+                // Virtio only supports kernel buffers.
+                // So we need to convert the possible user buffer into kernel buffer.
+                let buf_kvm: &[u8; SECTOR_SIZE] = (&buf
+                    [bytes_written..bytes_written + SECTOR_SIZE])
+                    .translate()
+                    .ok_or(OsError::BadPtr)?
+                    .try_into()
+                    .unwrap();
+                Virtio::write_sector(sector as _, buf_kvm);
+            } else {
+                // We need a bounce buffer, preserving old bytes which should not be written.
+                let mut bounce = [0; SECTOR_SIZE];
+                Virtio::read_sector(sector as _, &mut bounce);
+                bounce[sector_offset..sector_offset + chunk_size]
+                    .copy_from_slice(&buf[bytes_written..bytes_written + chunk_size]);
+                Virtio::write_sector(sector as _, &bounce);
+            }
+
+            buf_left -= chunk_size;
+            off += chunk_size;
+            bytes_written += chunk_size;
+        }
+
+        Ok(bytes_written)
+    }
+
+    fn force_write_at(&self, buf: &[u8], mut off: usize) -> Result<usize> {
         let mut bytes_written = 0;
         let mut buf_left = buf.len();
 

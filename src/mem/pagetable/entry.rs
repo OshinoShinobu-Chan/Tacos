@@ -38,7 +38,7 @@ impl Entry {
         Entry((((pa.value() >> PG_SHIFT) & PPN_MASK) << Self::FLAG_SHIFT) | flags.bits())
     }
 
-    fn flag(&self) -> PTEFlags {
+    pub fn flag(&self) -> PTEFlags {
         PTEFlags::from_bits_truncate(self.0)
     }
 
@@ -47,7 +47,8 @@ impl Entry {
     }
 
     pub fn evict(&mut self, index: usize) {
-        self.0 = index << Self::FLAG_SHIFT | 1 << 8 | 0x0;
+        let flag = self.flag() & (!PTEFlags::V);
+        self.0 = index << Self::FLAG_SHIFT | 1 << 8 | flag.bits();
     }
 
     pub fn on_disk(&self) -> bool {

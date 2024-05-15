@@ -15,7 +15,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 
 use self::dir::RootDir;
-use self::free_map::FreeMap;
+pub use self::free_map::FreeMap;
 use self::inode::Inode;
 
 use super::{File, FileSys, Vnode};
@@ -79,7 +79,7 @@ pub static DISKFS: Lazy<DiskFs> =
 pub struct DiskFs {
     #[allow(unused)]
     device: &'static Mutex<Virtio>,
-    pub(self) free_map: Mutex<FreeMap>,
+    pub free_map: Mutex<FreeMap>,
     pub root_dir: Mutex<RootDir>,
     inode_table: Mutex<BTreeMap<Inum, Weak<Inode>>>,
 }

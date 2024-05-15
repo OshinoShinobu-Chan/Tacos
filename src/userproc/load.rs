@@ -1,11 +1,12 @@
 use alloc::vec;
 use elf_rs::{Elf, ElfFile, ProgramHeaderEntry, ProgramHeaderFlags, ProgramType};
 
+use crate::fs::disk::Swap;
 use crate::fs::File;
 use crate::io::prelude::*;
 use crate::mem::pagetable::{PTEFlags, PageTable};
 use crate::mem::palloc::PhysMemPool;
-use crate::mem::{div_round_up, PageAlign, PhysAddr, PG_MASK, PG_SIZE};
+use crate::mem::{div_round_up, PageAlign, PhysAddr, PG_MASK, PG_SIZE, SUPPLEMENTAL_PAGETABLE};
 use crate::{OsError, Result};
 
 #[derive(Debug, Clone, Copy)]
@@ -52,7 +53,7 @@ fn load_elf(file: &mut File, pagetable: &mut PageTable) -> Result<ExecInfo> {
     // load each loadable segment into memory
     elf.program_header_iter()
         .filter(|p| p.ph_type() == ProgramType::LOAD)
-        .for_each(|p| load_segment(&buf, &p, pagetable));
+        .for_each(|p| load_segment(&buf, &p, pagetable, file.clone()));
 
     let entry_point = elf.elf_header().entry_point() as usize;
 
@@ -63,7 +64,7 @@ fn load_elf(file: &mut File, pagetable: &mut PageTable) -> Result<ExecInfo> {
 }
 
 /// Loads one segment and installs pagetable mappings
-fn load_segment(filebuf: &[u8], phdr: &ProgramHeaderEntry, pagetable: &mut PageTable) {
+fn load_segment(filebuf: &[u8], phdr: &ProgramHeaderEntry, pagetable: &mut PageTable, file: File) {
     assert_eq!(phdr.ph_type(), ProgramType::LOAD);
 
     // Meaningful contents of this segment starts from `fileoff`.
@@ -92,24 +93,43 @@ fn load_segment(filebuf: &[u8], phdr: &ProgramHeaderEntry, pagetable: &mut PageT
     // Allocate & map pages
     for p in 0..pages {
         let uaddr = ubase + p * PG_SIZE;
-        // let buf = unsafe { UserPool::alloc_pages(1) };
-        let buf = PhysMemPool::pinned_alloc(uaddr) as *mut u8;
-        let page = unsafe { (buf as *mut [u8; PG_SIZE]).as_mut().unwrap() };
 
-        // Read `readsz` bytes, fill remaining bytes with 0.
         let readsz = readbytes.min(PG_SIZE);
-        page[..readsz].copy_from_slice(&filebuf[readpos..readpos + readsz]);
-        page[readsz..].fill(0);
+        // let buf = unsafe { UserPool::alloc_pages(1) };
+        // let buf = PhysMemPool::pinned_alloc(uaddr) as *mut u8;
+        let pagetype = {
+            if leaf_flag.contains(PTEFlags::W) {
+                // TODO: find a free sector in swap to store
+                let mut swap = Swap::lock();
+                swap.seek(SeekFrom::End(0)).unwrap();
+                let offset = swap.len().unwrap();
+                swap.write(&filebuf[readpos..readpos + readsz]).unwrap();
+                let remain = [0 as u8; PG_SIZE];
+                swap.write(&remain[readsz..]).unwrap();
+                crate::mem::PageType::Swap(Some(offset))
+            } else {
+                crate::mem::PageType::Code((file.clone(), readpos, readsz))
+            }
+        };
+        let index = SUPPLEMENTAL_PAGETABLE.lock().lazy_alloc(pagetype);
+        // let page = unsafe { (buf as *mut [u8; PG_SIZE]).as_mut().unwrap() };
+
+        // // Read `readsz` bytes, fill remaining bytes with 0.
+
+        // page[..readsz].copy_from_slice(&filebuf[readpos..readpos + readsz]);
+        // page[readsz..].fill(0);
 
         // The installed page will be freed when pagetable drops, which happens
         // when user process exits. No manual resource collect is required.
-        pagetable.map(buf.into(), uaddr, 1, leaf_flag);
+        pagetable.map(PhysAddr::from_pa(0), uaddr, 1, leaf_flag);
+        let entry = pagetable.get_mut_pte(uaddr).unwrap();
+        entry.evict(index);
 
         readbytes -= readsz;
         readpos += readsz;
     }
 
-    assert_eq!(readbytes, 0);
+    // assert_eq!(readbytes, 0);
 }
 
 /// Initializes the user stack.

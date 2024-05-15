@@ -28,6 +28,10 @@ impl UserProc {
             parent: Arc::downgrade(&parent),
         }
     }
+
+    pub fn get_bin(&self) -> File {
+        self.bin.clone()
+    }
 }
 
 /// Execute an object file with arguments.

@@ -51,6 +51,7 @@ pub trait FileSys: Sync + Send + Sized {
 pub trait Vnode: Sync + Send {
     fn read_at(&self, buf: &mut [u8], off: usize) -> Result<usize>;
     fn write_at(&self, buf: &[u8], off: usize) -> Result<usize>;
+    fn force_write_at(&self, buf: &[u8], off: usize) -> Result<usize>;
     fn deny_write(&self);
     fn allow_write(&self);
 
@@ -58,6 +59,7 @@ pub trait Vnode: Sync + Send {
     fn len(&self) -> usize;
     fn resize(&self, size: usize) -> Result<()>;
     fn close(&self);
+    fn start(&self) -> usize;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -82,6 +84,10 @@ impl File {
     pub fn inum(&self) -> usize {
         self.vnode.inum()
     }
+
+    pub fn start(&self) -> usize {
+        self.vnode.start()
+    }
 }
 
 impl Read for File {
@@ -95,6 +101,12 @@ impl Read for File {
 impl Write for File {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let cnt = self.vnode.write_at(buf, self.pos)?;
+        self.pos += cnt;
+        Ok(cnt)
+    }
+
+    fn force_write(&mut self, buf: &[u8]) -> Result<usize> {
+        let cnt = self.vnode.force_write_at(buf, self.pos)?;
         self.pos += cnt;
         Ok(cnt)
     }

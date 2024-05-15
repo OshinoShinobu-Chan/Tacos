@@ -73,6 +73,10 @@ impl Vnode for Inode {
         self.buf.lock().as_ptr() as usize
     }
 
+    fn start(&self) -> usize {
+        self.inum()
+    }
+
     fn len(&self) -> usize {
         self.buf.lock().len()
     }
@@ -102,6 +106,10 @@ impl Vnode for Inode {
         let nb = &mut lock[off..off + len];
         nb.copy_from_slice(&buf[..len]);
         Ok(len)
+    }
+
+    fn force_write_at(&self, buf: &[u8], off: usize) -> Result<usize> {
+        self.write_at(buf, off)
     }
 
     fn resize(&self, _size: usize) -> Result<()> {

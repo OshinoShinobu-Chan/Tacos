@@ -5,6 +5,9 @@ use alloc::vec::Vec;
 
 pub use self::list::{InMemList, IterMut};
 
+use crate::device::virtio::SECTOR_SIZE;
+use crate::fs::disk::Swap;
+use crate::fs::disk::DISKFS;
 use crate::fs::File;
 use crate::mem::layout::VM_OFFSET;
 use crate::sync::{Intr, Lazy, Mutex};
@@ -119,7 +122,8 @@ impl PageAlign for PhysAddr {
 pub enum PageType {
     /// offset
     Swap(Option<usize>),
-    Code,
+    /// (offset, readsize)
+    Code((File, usize, usize)),
     /// (file, offset)
     Mmap((File, usize)),
 }
@@ -158,6 +162,12 @@ impl SupplementalPageTable {
         assert!(index < self.list.len());
         assert!(self.list[index].is_some());
         // TODO: if page is Swap, free the disk
+        // if let PageType::Swap(Some(offset)) = self.list[index].clone().unwrap() {
+        //     let swap = Swap::lock();
+        //     let start_sector = swap.start();
+        //     let aim_sector = start_sector + offset / SECTOR_SIZE;
+        //     DISKFS.free_map.lock().reset(aim_sector as u32);
+        // }
         self.list[index] = None;
         self.recycled_slot.push_front(index);
     }
