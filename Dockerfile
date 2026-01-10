@@ -26,10 +26,12 @@ RUN rm -rf qemu-${QEMU_VERSION} qemu-${QEMU_VERSION}.tar.xz
 # Install Rust
 # - https://www.rust-lang.org/tools/install
 
-ARG RUST_VERSION=1.70
+ARG RUST_VERSION=stable
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup \
+    RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --profile minimal --default-toolchain ${RUST_VERSION} && \
@@ -41,6 +43,10 @@ RUN cargo install cargo-binutils --vers ~0.2 && \
     rustup target add riscv64gc-unknown-none-elf
 
 RUN rustup component add clippy rustfmt
+
+# Add Tsinghua Cargo mirror
+RUN echo 'export RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup' >> ~/.bashrc
+RUN echo 'export RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup' >> ~/.bashrc
 
 # Make GDB easier
 RUN mkdir -p ~/.config/gdb
