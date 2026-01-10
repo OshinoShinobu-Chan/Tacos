@@ -21,6 +21,7 @@ TARGETS := $(OBJS:%.o=%)
 TEST_DIR := $(BUILD_DIR)/user
 
 $(BUILD_DIR)/%.S: %.pl
+	@ mkdir -p $(dir $@)
 	perl $^ > $@
 
 $(BUILD_DIR)/%.o: $(BUILD_DIR)/%.S
