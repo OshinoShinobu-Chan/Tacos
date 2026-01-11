@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 mod fs;
 mod malloc;
 mod sync;
