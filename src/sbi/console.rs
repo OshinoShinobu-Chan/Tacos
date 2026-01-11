@@ -27,14 +27,17 @@ pub struct StdoutLock<'a> {
 /// The one and only Stdout instance
 pub fn stdout() -> &'static mut Stdout {
     static mut INSTANCE: Stdout = Stdout;
-    unsafe { &mut INSTANCE }
+    #[allow(static_mut_refs)]
+    unsafe {
+        &mut INSTANCE
+    }
 }
 
 impl Stdout {
     /// Lock the Stdout to print message exclusively
     ///
     /// This is a re-entrant lock, allowing called in a nested manner.
-    pub fn lock(&self) -> StdoutLock {
+    pub fn lock(&self) -> StdoutLock<'_> {
         StdoutLock {
             inner: stdout(),
             intr: interrupt::set(false),
