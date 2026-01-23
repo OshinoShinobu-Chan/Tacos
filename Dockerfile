@@ -55,3 +55,6 @@ RUN echo "add-auto-load-safe-path /" > ~/.config/gdb/gdbinit
 # Use tacos as the runner
 COPY tacos /usr/bin
 RUN chmod +x /usr/bin/tacos
+
+RUN apt-get install -y python3-pip
+RUN pip3 install requests json typing
