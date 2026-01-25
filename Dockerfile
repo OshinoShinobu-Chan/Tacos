@@ -55,8 +55,4 @@ COPY tacos /usr/bin
 RUN chmod +x /usr/bin/tacos
 
 RUN apt-get install -y python3-pip
-<<<<<<< HEAD
 RUN pip3 install requests typing
-=======
-RUN pip3 install requests typing
->>>>>>> 109a3a5a47ef65523d8143edffca7b5de541d686
