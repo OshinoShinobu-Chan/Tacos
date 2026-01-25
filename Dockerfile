@@ -26,12 +26,10 @@ RUN rm -rf qemu-${QEMU_VERSION} qemu-${QEMU_VERSION}.tar.xz
 # Install Rust
 # - https://www.rust-lang.org/tools/install
 
-ARG RUST_VERSION=stable
+ARG RUST_VERSION=1.92
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup \
-    RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup
+    PATH=/usr/local/cargo/bin:$PATH
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --profile minimal --default-toolchain ${RUST_VERSION} && \
@@ -57,4 +55,4 @@ COPY tacos /usr/bin
 RUN chmod +x /usr/bin/tacos
 
 RUN apt-get install -y python3-pip
-RUN pip3 install requests json typing
+RUN pip3 install requests typing
