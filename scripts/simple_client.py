@@ -198,7 +198,7 @@ if __name__ == "__main__":
 
     try:
         print("=" * 35 + "UPLOADING" + "=" * 35)
-        uuid = lab_task(LAB1_URI, file_path, CHUNK_SIZE)
+        uuid = lab_task(lab_uri, file_path, CHUNK_SIZE)
         print("Test begin.")
         if uuid is None or uuid == "":
             raise Exception("\n\033[0;31m[UPLOAD FAILED]\033[0m Failed to obtain UUID from server response.")
