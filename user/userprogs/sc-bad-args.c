@@ -19,7 +19,7 @@ void main() {
     /* Passes arbitrary invalid pointers */
     assert(exec("child-simple", (void*)0xbad) == -1);
     assert(open((void*)0xdeadbeaf, O_CREATE) == -1);
-    assert(read(fd, (void*)0xdeadbeaf, sizeof buf));
+    assert(read(fd, (void*)0xdeadbeaf, sizeof buf) == -1);
     assert(write(1, (void*)0xbad, 123) == -1);
 
     /* Passes pointers in the kernel space */
