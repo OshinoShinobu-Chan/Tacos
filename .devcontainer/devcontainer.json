@@ -2,7 +2,7 @@
 // README at: https://github.com/devcontainers/templates/tree/main/src/docker-existing-dockerfile
 {
   "name": "Tacos",
-  "image": "crimmypeng/tacos:rust-1.92",
+  "image": "crimmypeng/tacos:rust-1.92v3",
   "customizations": {
     "vscode": {
       "settings": {

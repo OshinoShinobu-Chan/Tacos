@@ -26,7 +26,7 @@ RUN rm -rf qemu-${QEMU_VERSION} qemu-${QEMU_VERSION}.tar.xz
 # Install Rust
 # - https://www.rust-lang.org/tools/install
 
-ARG RUST_VERSION=stable
+ARG RUST_VERSION=1.92
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
@@ -55,3 +55,6 @@ RUN echo "add-auto-load-safe-path /" > ~/.config/gdb/gdbinit
 # Use tacos as the runner
 COPY tacos /usr/bin
 RUN chmod +x /usr/bin/tacos
+
+RUN apt-get install -y python3-pip
+RUN pip3 install requests typing
