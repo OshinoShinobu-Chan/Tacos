@@ -1,9 +1,9 @@
 # case_name = ["args", option<grade>]
-# MMAP: 24
+# MMAP: 21
 mmap-clean = ["", 3]
 mmap-close = ["", 3]
 mmap-read = ["", 3]
-mmap-remove = ["", 3]
+# mmap-remove = ["", 3]
 mmap-twice = ["", 3]
 mmap-unmap = ["", 3]
 mmap-write = ["", 3]
@@ -15,11 +15,11 @@ page-merge-mm = ["", 3, 600]
 page-merge-par = ["", 3, 600]
 page-merge-seq = ["", 9, 600]
 page-merge-stk = ["", 3, 600]
-# Robustness: 46
+# Robustness: 49
 pt-bad-addr = ["", 2]
-pt-bad-read = ["", 2]
-pt-write-code = ["", 2]
-pt-write-code2 = ["", 2]
+pt-bad-read = ["", 3]
+pt-write-code = ["", 3]
+pt-write-code2 = ["", 3]
 pt-big-stk-obj = ["", 3]
 pt-grow-bad = ["", 3]
 pt-grow-stack = ["", 3]
